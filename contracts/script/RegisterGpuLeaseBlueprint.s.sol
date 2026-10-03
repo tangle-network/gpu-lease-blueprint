@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {Script, console2} from "forge-std/Script.sol";
+import {Base64} from "@openzeppelin/contracts/utils/Base64.sol";
 import "tnt-core/libraries/Types.sol";
 import "../src/GpuLeaseBlueprint.sol";
 import "../src/GpuLeaseVault.sol";
@@ -41,6 +42,26 @@ contract RegisterGpuLeaseBlueprint is Script {
         console2.log("GPU_LEASE_VAULT=%s", address(vault));
         console2.log("GPU_LEASE_BSM=%s", address(bsm));
         console2.log("GPU_LEASE_BLUEPRINT_ID=%s", blueprintId);
+        console2.logBytes32(metadataHash);
+    }
+
+    /// The canonical metadata JSON, generated from the Rust `sol!` types:
+    ///   cargo run -p gpu-lease-blueprint-gen
+    /// Embedded as a self-contained data URI so the on-chain definition is
+    /// fully driver-readable with no external fetch dependency. The hash pins
+    /// it; the TangleDriver verifies keccak256(json) == metadataHash.
+    string internal metadataJson;
+    bytes32 internal metadataHash;
+    string internal metadataUri;
+
+    function _loadMetadata() internal {
+        if (bytes(metadataJson).length == 0) {
+            metadataJson = vm.readFile("metadata/blueprint.json");
+            metadataHash = keccak256(bytes(metadataJson));
+            metadataUri = string(
+                abi.encodePacked("data:application/json;base64,", Base64.encode(bytes(metadataJson)))
+            );
+        }
     }
 
     function _buildJobs() internal pure returns (Types.JobDefinition[] memory jobs) {
@@ -52,9 +73,10 @@ contract RegisterGpuLeaseBlueprint is Script {
         jobs[3] = Types.JobDefinition("reap", "Permissionless post-expiry teardown", "", "", "");
     }
 
-    function _buildDefinition(address manager) internal pure returns (Types.BlueprintDefinition memory def) {
-        def.metadataUri = "https://github.com/tangle-network/gpu-lease-blueprint";
-        def.metadataHash = keccak256(bytes(def.metadataUri));
+    function _buildDefinition(address manager) internal returns (Types.BlueprintDefinition memory def) {
+        _loadMetadata();
+        def.metadataUri = metadataUri;
+        def.metadataHash = metadataHash;
         def.manager = manager;
         def.masterManagerRevision = 0;
         def.hasConfig = true;
@@ -73,6 +95,7 @@ contract RegisterGpuLeaseBlueprint is Script {
             name: "GPU Lease Blueprint",
             description: "Escrowed GPU leases: parking-meter economics, RFQ pricing, TEE-bound quotes",
             author: "Tangle",
+            // Convention the TangleDriver keys on for compute semantics.
             category: "Compute",
             codeRepository: "https://github.com/tangle-network/gpu-lease-blueprint",
             logo: "",
@@ -84,6 +107,37 @@ contract RegisterGpuLeaseBlueprint is Script {
         def.jobs = _buildJobs();
         def.registrationSchema = "";
         def.requestSchema = "";
-        def.sources = new Types.BlueprintSource[](0);
+        def.sources = _buildSources();
+    }
+
+    /// Minimal valid container source (protocol requires >=1 source with >=1
+    /// binary carrying a non-zero sha256 — Errors.BlueprintSourcesRequired).
+    /// Replace the sha256 with the real image digest at publish time.
+    function _buildSources() internal pure returns (Types.BlueprintSource[] memory sources) {
+        sources = new Types.BlueprintSource[](1);
+        Types.BlueprintBinary[] memory bins = new Types.BlueprintBinary[](1);
+        bins[0] = Types.BlueprintBinary({
+            arch: Types.BlueprintArchitecture.Amd64,
+            os: Types.BlueprintOperatingSystem.Linux,
+            name: "gpu-lease-blueprint",
+            sha256: bytes32(uint256(0xdeadbeef)) // TODO: real image digest at publish
+        });
+        sources[0] = Types.BlueprintSource({
+            kind: Types.BlueprintSourceKind.Container,
+            container: Types.ImageRegistrySource({
+                registry: "ghcr.io",
+                image: "tangle-network/gpu-lease-blueprint",
+                tag: "latest"
+            }),
+            wasm: Types.WasmSource({
+                runtime: Types.WasmRuntime.Unknown,
+                fetcher: Types.BlueprintFetcherKind.None,
+                artifactUri: "",
+                entrypoint: ""
+            }),
+            native: Types.NativeSource({ fetcher: Types.BlueprintFetcherKind.None, artifactUri: "", entrypoint: "" }),
+            testing: Types.TestingSource({ cargoPackage: "", cargoBin: "", basePath: "" }),
+            binaries: bins
+        });
     }
 }

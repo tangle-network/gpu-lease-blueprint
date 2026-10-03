@@ -41,6 +41,25 @@ New this session:
    double-released the allocator lease (UnknownLease) — now single-release,
    idempotent.
 
+## NEW: canonical metadata + driver round-trip (done this session)
+
+- `gpu-lease-blueprint-gen` — THE single-truth flow: Rust `sol!` types →
+  EIP-712 `encode_type` → `metadata/blueprint.json` (jobs, encodeTypes,
+  typehashes, category=Compute, resource descriptor). A bin + staleness test
+  (`committed_metadata_matches_sol_types`) makes drift a failing test, not a
+  review comment.
+- `RegisterGpuLeaseBlueprint.s.sol` now embeds the canonical JSON as a
+  `data:application/json;base64,...` metadataUri + keccak metadataHash
+  (self-contained on-chain; switch to IPFS later on gas-capped chains — same
+  pin). Also fixed: sources array was EMPTY (would have reverted
+  BlueprintSourcesRequired on broadcast) — now a minimal valid container
+  source (replace sha256 with the real image digest at publish).
+- E2E round-trip (live chain, part of run-e2e.sh): `createBlueprint` with our
+  pinned definition → read back via `blueprintMetadata` → on-chain hash ==
+  keccak(json) → data URI decoded → jobs `lease/release/extend/reap`
+  verified. `driver round-trip ok: registered id=1 hash=0xe72c0587...`
+- Zero protocol changes. All fields/views used exist in tnt-core 0.19.
+
 ## Continuation point (in order)
 
 1. **Register against a persistent LocalTestnet anvil** (not the ephemeral

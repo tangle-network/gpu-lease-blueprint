@@ -136,6 +136,81 @@ sol! {
             view
             returns (TangleBlueprintMetadata metadata, string metadataUri, bytes32 metadataHash);
     }
+
+    // ── tnt-core 0.19 Types mirror (only what createBlueprint needs) ──────
+
+    enum MembershipModel { Fixed, Dynamic }
+    enum PricingModel { PayOnce, Subscription, EventDriven }
+    enum BlueprintSourceKind { Container, Wasm, Native }
+    enum BlueprintFetcherKind { None }
+    enum WasmRuntime { Unknown, Wasmtime, Wasmer }
+    enum BlueprintArchitecture { Wasm32, Wasm64, Wasi32, Wasi64, Amd32, Amd64, Arm32, Arm64 }
+    enum BlueprintOperatingSystem { Unknown, Linux, Windows, MacOS, BSD }
+
+    struct ImageRegistrySource { string registry; string image; string tag; }
+    struct WasmSource { WasmRuntime runtime; BlueprintFetcherKind fetcher; string artifactUri; string entrypoint; }
+    struct NativeSource { BlueprintFetcherKind fetcher; string artifactUri; string entrypoint; }
+    struct TestingSource { string cargoPackage; string cargoBin; string basePath; }
+    struct BlueprintBinary { BlueprintArchitecture arch; BlueprintOperatingSystem os; string name; bytes32 sha256; }
+    struct BlueprintSource {
+        BlueprintSourceKind kind;
+        ImageRegistrySource container;
+        WasmSource wasm;
+        NativeSource native;
+        TestingSource testing;
+        BlueprintBinary[] binaries;
+    }
+    struct TangleJobDefinition { string name; string description; string metadataUri; bytes paramsSchema; bytes resultSchema; }
+    struct TangleBlueprintConfig {
+        MembershipModel membership;
+        PricingModel pricing;
+        uint32 minOperators;
+        uint32 maxOperators;
+        uint256 subscriptionRate;
+        uint64 subscriptionInterval;
+        uint256 eventRate;
+    }
+    struct BlueprintDefinitionFull {
+        string metadataUri;
+        bytes32 metadataHash;
+        address manager;
+        uint32 masterManagerRevision;
+        bool hasConfig;
+        TangleBlueprintConfig config;
+        TangleBlueprintMetadata metadata;
+        TangleJobDefinition[] jobs;
+        bytes registrationSchema;
+        bytes requestSchema;
+        BlueprintSource[] sources;
+        MembershipModel[] supportedMemberships;
+    }
+
+    #[sol(rpc)]
+    interface ITangleReg {
+        function createBlueprint(BlueprintDefinitionFull calldata def) external returns (uint64);
+    }
+}
+
+/// The canonical metadata JSON path (generated: `cargo run -p gpu-lease-blueprint-gen`).
+const METADATA_JSON: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../metadata/blueprint.json");
+
+fn vault_placeholder() -> Address {
+    // The manager address is irrelevant to the metadata round-trip proof.
+    Address::ZERO
+}
+
+fn deployer_for_registration() -> Address {
+    // anvil #0 — the LocalTestnet deployer that originally registered blueprint 0.
+    "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".parse().unwrap()
+}
+
+fn keccak256(data: &[u8]) -> [u8; 32] {
+    use tiny_keccak::{Hasher, Keccak};
+    let mut k = Keccak::v256();
+    k.update(data);
+    let mut out = [0u8; 32];
+    k.finalize(&mut out);
+    out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -361,6 +436,137 @@ async fn gpu_lease_full_lifecycle_end_to_end() -> Result<()> {
                 "driver spike: blueprintCount={count} name={:?} category={:?} metadataUri={:?} hash={:#x}",
                 meta.metadata.name, meta.metadata.category, meta.metadataUri, meta.metadataHash
             );
+        }
+
+        // ── 0b. Driver round-trip: register OUR hash-pinned definition, read it
+        //       back, verify the pin and the payload — the full TangleDriver
+        //       contract with zero protocol changes. ─────────────────────────
+        if let Ok(canonical_json) = std::fs::read_to_string(METADATA_JSON) {
+            let json_bytes = canonical_json.as_bytes();
+            let json_hash = keccak256(json_bytes);
+            use base64::Engine as _;
+            let data_uri = format!(
+                "data:application/json;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(json_bytes)
+            );
+
+            let count_before: u64 = {
+                let provider = chain.provider().await?;
+                ITangleViews::new(tangle_addr, &provider).blueprintCount().call().await?
+            };
+
+            let jobs: Vec<TangleJobDefinition> = ["lease", "release", "extend", "reap"]
+                .iter()
+                .map(|&name| TangleJobDefinition {
+                    name: name.to_string(),
+                    description: String::new(),
+                    metadataUri: String::new(),
+                    paramsSchema: Vec::new().into(),
+                    resultSchema: Vec::new().into(),
+                })
+                .collect();
+            let def = BlueprintDefinitionFull {
+                metadataUri: data_uri.clone(),
+                metadataHash: json_hash.into(),
+                manager: vault_placeholder(),
+                masterManagerRevision: 0,
+                hasConfig: true,
+                config: TangleBlueprintConfig {
+                    membership: MembershipModel::Dynamic,
+                    pricing: PricingModel::EventDriven,
+                    minOperators: 1,
+                    maxOperators: 100,
+                    subscriptionRate: U256::ZERO,
+                    subscriptionInterval: 0,
+                    eventRate: U256::from(1e15 as u64),
+                },
+                metadata: TangleBlueprintMetadata {
+                    name: "GPU Lease Blueprint".into(),
+                    description: "Escrowed GPU leases".into(),
+                    author: "Tangle".into(),
+                    category: "Compute".into(),
+                    codeRepository: "https://github.com/tangle-network/gpu-lease-blueprint".into(),
+                    logo: String::new(),
+                    website: "https://tangle.network".into(),
+                    license: "MIT OR Apache-2.0".into(),
+                    profilingData: String::new(),
+                },
+                jobs,
+                registrationSchema: Vec::new().into(),
+                requestSchema: Vec::new().into(),
+                sources: vec![BlueprintSource {
+                    kind: BlueprintSourceKind::Container,
+                    container: ImageRegistrySource {
+                        registry: "ghcr.io".into(),
+                        image: "tangle-network/gpu-lease-blueprint".into(),
+                        tag: "latest".into(),
+                    },
+                    wasm: WasmSource {
+                        runtime: WasmRuntime::Unknown,
+                        fetcher: BlueprintFetcherKind::None,
+                        artifactUri: String::new(),
+                        entrypoint: String::new(),
+                    },
+                    native: NativeSource {
+                        fetcher: BlueprintFetcherKind::None,
+                        artifactUri: String::new(),
+                        entrypoint: String::new(),
+                    },
+                    testing: TestingSource {
+                        cargoPackage: String::new(),
+                        cargoBin: String::new(),
+                        basePath: String::new(),
+                    },
+                    binaries: vec![BlueprintBinary {
+                        arch: BlueprintArchitecture::Amd64,
+                        os: BlueprintOperatingSystem::Linux,
+                        name: "gpu-lease-blueprint".into(),
+                        sha256: [0xaa; 32].into(),
+                    }],
+                }],
+                supportedMemberships: vec![MembershipModel::Dynamic],
+            };
+
+            let reg_input = ITangleReg::createBlueprintCall { def }.abi_encode();
+            chain
+                .send(deployer_for_registration(), reg_input, Some(tangle_addr), U256::ZERO)
+                .await
+                .context("createBlueprint failed")?;
+
+            // Read it back — exactly what the TangleDriver does.
+            let provider = chain.provider().await?;
+            let views = ITangleViews::new(tangle_addr, &provider);
+            let count_after: u64 = views.blueprintCount().call().await?;
+            anyhow::ensure!(count_after == count_before + 1, "blueprint count did not advance");
+            let read_back = views.blueprintMetadata(count_after - 1).call().await?;
+
+            // The pin holds: on-chain hash == keccak(canonical JSON).
+            anyhow::ensure!(
+                read_back.metadataHash.0 == json_hash,
+                "metadataHash mismatch: on-chain pin does not match the canonical JSON"
+            );
+            // The payload is intact and driver-parseable from the data URI.
+            anyhow::ensure!(read_back.metadataUri == data_uri, "metadataUri mismatch");
+            let b64 = data_uri.strip_prefix("data:application/json;base64,").unwrap();
+            let decoded = base64::engine::general_purpose::STANDARD.decode(b64)?;
+            let doc: serde_json::Value = serde_json::from_slice(&decoded)?;
+            anyhow::ensure!(doc["blueprint"]["category"] == "Compute");
+            anyhow::ensure!(doc["schemaVersion"] == 1);
+            let names: Vec<&str> = doc["jobs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|j| j["name"].as_str().unwrap())
+                .collect();
+            anyhow::ensure!(names == ["lease", "release", "extend", "reap"], "job names: {names:?}");
+            eprintln!(
+                "driver round-trip ok: registered id={} hash=0x{} jobs={:?}",
+                count_after - 1,
+                hex::encode(json_hash),
+                names
+            );
+        } else {
+            eprintln!("skipping driver round-trip: {METADATA_JSON} missing (run the gen)");
         }
 
         // ── Cast: buyer, operator-money-sink, reaper, deployer ────────────

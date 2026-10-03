@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "gpu-lease-blueprint-lib",
     "gpu-lease-blueprint-bin",
+    "gpu-lease-blueprint-gen",
 ]
 
 [workspace.package]

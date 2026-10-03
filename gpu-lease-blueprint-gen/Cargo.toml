@@ -1,0 +1,18 @@
+[package]
+name = "gpu-lease-blueprint-gen"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gpu-lease-blueprint-gen"
+path = "src/main.rs"
+
+[dependencies]
+gpu-lease-blueprint-lib = { path = "../gpu-lease-blueprint-lib" }
+blueprint-sdk = { version = "=0.2.0-alpha.12", default-features = false, features = ["std", "tangle"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+hex = "0.4"
+tiny-keccak = { version = "2", features = ["keccak"] }

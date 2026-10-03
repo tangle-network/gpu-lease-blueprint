@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "blueprint": {
+    "id": "gpu-lease-blueprint",
+    "name": "GPU Lease Blueprint",
+    "category": "Compute",
+    "description": "Escrowed GPU leases: parking-meter economics, RFQ pricing, TEE-bound quotes",
+    "codeRepository": "https://github.com/tangle-network/gpu-lease-blueprint",
+    "license": "MIT OR Apache-2.0"
+  },
+  "resource": {
+    "kind": "gpu",
+    "unit": "second",
+    "meter": "escrow",
+    "settlement": "vault",
+    "classes": [
+      "a100-80gb",
+      "h100",
+      "h100-tee",
+      "b200"
+    ],
+    "quote": {
+      "factors": [
+        "classBps",
+        "utilizationCurve",
+        "teePremiumBps"
+      ],
+      "endpoint": "/api/quote",
+      "capabilities": "/api/capabilities"
+    }
+  },
+  "jobs": [
+    {
+      "id": 0,
+      "name": "lease",
+      "description": "Create an escrowed GPU lease (allocates a device)",
+      "params": {
+        "encodeType": "GpuLeaseRequest(uint8 intentVersion,bytes32 intentHash,uint128 pricePerSecond,uint64 durationSeconds,uint8 confidentiality,string gpuClass,string region,address lessee,bytes32 leaseId)",
+        "typehash": "0xb51156e55b9b138a779e999bfdb0bd2b5a403975a23c799eb58f715d60db7454"
+      },
+      "result": {
+        "encodeType": "GpuLeaseOutput(bytes32 leaseId,string endpoint,uint16 schemaVersion)",
+        "typehash": "0x6cfa11ef3ad3fc25d059b2d836a0d81c05323b51f95098fc5bc1c7c8ee7a0627"
+      }
+    },
+    {
+      "id": 1,
+      "name": "release",
+      "description": "Voluntarily release a lease (exact pro-rata refund on the vault)",
+      "params": {
+        "encodeType": "GpuLeaseIdRequest(bytes32 leaseId)",
+        "typehash": "0xd05f45bc38f65d2ae661a2e32052ec378d44673c665eedf9755aa135bcab0eeb"
+      },
+      "result": {
+        "encodeType": "GpuLeaseAck(bytes32 leaseId,uint8 state,uint16 schemaVersion)",
+        "typehash": "0xb541013fb4de11e7420b99183de2687faa7947816b7791c43aa568f50418cbea"
+      }
+    },
+    {
+      "id": 2,
+      "name": "extend",
+      "description": "Extend a lease session (escrow topped up on the vault)",
+      "params": {
+        "encodeType": "GpuLeaseExtendRequest(bytes32 leaseId,uint64 addSeconds)",
+        "typehash": "0xfc49cff8a97ee8a1c01d9b33048f5dd2bfb0da85121337b608f5d8d8585d4100"
+      },
+      "result": {
+        "encodeType": "GpuLeaseAck(bytes32 leaseId,uint8 state,uint16 schemaVersion)",
+        "typehash": "0xb541013fb4de11e7420b99183de2687faa7947816b7791c43aa568f50418cbea"
+      }
+    },
+    {
+      "id": 3,
+      "name": "reap",
+      "description": "Permissionless post-expiry teardown",
+      "params": {
+        "encodeType": "GpuLeaseIdRequest(bytes32 leaseId)",
+        "typehash": "0xd05f45bc38f65d2ae661a2e32052ec378d44673c665eedf9755aa135bcab0eeb"
+      },
+      "result": {
+        "encodeType": "GpuLeaseAck(bytes32 leaseId,uint8 state,uint16 schemaVersion)",
+        "typehash": "0xb541013fb4de11e7420b99183de2687faa7947816b7791c43aa568f50418cbea"
+      }
+    }
+  ],
+  "vault": {
+    "leaseView": "leases(bytes32)",
+    "states": {
+      "0": "Live",
+      "1": "Released",
+      "2": "Reaped"
+    }
+  }
+}
