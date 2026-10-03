@@ -1,25 +1,35 @@
-//! E2E: the four SPEC §1 jobs through a REAL local tnt-core on anvil.
+//! E2E: the full GPU-lease lifecycle through a REAL local tnt-core on anvil —
+//! jobs AND money on one chain.
 //!
 //! `BlueprintHarness` boots an anvil container seeded from the bundled
-//! LocalTestnet broadcast (full Tangle stack: master manager, staking,
-//! status registry), registers a service for this router, runs the real
-//! `BlueprintRunner` with our job handlers, and submits jobs on-chain.
+//! LocalTestnet broadcast (full Tangle stack), runs the real `BlueprintRunner`
+//! with our job handlers, and submits jobs on-chain. This suite additionally
+//! deploys the REAL `GpuLeaseVault` (bytecode from the foundry artifact) on
+//! the same chain and proves the complete loop:
 //!
-//! The lifecycle proven here: LEASE (device allocated, public endpoint
-//! returned) → EXTEND (session pushed out) → RELEASE (device freed,
-//! credentials revoked). Money settlement is the vault's, pinned by the
-//! Foundry suite; this test pins the tnt-core job path.
+//!   buyer escrows (vault.create) → LEASE job (request carries the vault
+//!   leaseId; result echoes it) → EXTEND (job + vault escrow) → time warp →
+//!   RELEASE (job + vault release: EXACT pro-rata refund asserted to the wei)
+//!   → operator withdraws earnings → second lease → warp past expiry →
+//!   REAP job + permissionless vault.reap → full take.
 //!
-//! Requires Docker (colima). Skips gracefully when artifacts are missing.
+//! I1 is asserted on the live chain after every step:
+//!   vault.balance == totalEscrowed + operatorEarnings.
+//!
+//! Requires Docker (colima). Skips gracefully when Docker/artifacts are
+//! missing — use `scripts/run-e2e.sh` for the proven invocation.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use blueprint_anvil_testing_utils::{BlueprintHarness, missing_tnt_core_artifacts};
-use blueprint_sdk::alloy::primitives::Bytes;
-use blueprint_sdk::alloy::sol_types::SolValue;
+use blueprint_sdk::alloy::primitives::{Address, Bytes, U256};
+use blueprint_sdk::alloy::providers::{Provider, ProviderBuilder};
+use alloy_rpc_types::TransactionRequest;
+use blueprint_sdk::alloy::sol;
+use blueprint_sdk::alloy::sol_types::{SolCall, SolEvent, SolValue};
 use gpu_lease_blueprint_lib::jobs;
 use gpu_lease_blueprint_lib::{
     GpuLeaseAck, GpuLeaseExtendRequest, GpuLeaseIdRequest, GpuLeaseOutput, GpuLeaseRequest,
-    JOB_EXTEND, JOB_LEASE, JOB_RELEASE, router,
+    JOB_EXTEND, JOB_LEASE, JOB_RELEASE, JOB_REAP, router,
 };
 use once_cell::sync::Lazy;
 use std::time::Duration;
@@ -28,6 +38,11 @@ use tokio::time::timeout;
 
 const ANVIL_TEST_TIMEOUT: Duration = Duration::from_secs(600);
 const JOB_RESULT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Foundry artifact for the vault — produced by `forge build`.
+const VAULT_ARTIFACT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../contracts/out/GpuLeaseVault.sol/GpuLeaseVault.json"
+);
 
 static HARNESS_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 static LOG_INIT: std::sync::Once = std::sync::Once::new();
@@ -43,22 +58,28 @@ fn setup_log() {
 const GPU_INVENTORY: &str = r#"[{"id":"gpu-0","gpu_class":"h100","tee":false,"cuda_ordinal":0}]"#;
 
 async fn spawn_harness() -> Result<Option<BlueprintHarness>> {
-    match BlueprintHarness::builder(router())
-        .poll_interval(Duration::from_millis(50))
-        .with_env_var("GPU_INVENTORY_JSON", GPU_INVENTORY)
-        .spawn()
-        .await
-    {
-        Ok(harness) => Ok(Some(harness)),
-        Err(err) => {
-            if missing_tnt_core_artifacts(&err) {
-                eprintln!("skipping e2e: {err}");
-                Ok(None)
-            } else {
-                Err(err)
+    // The anvil container occasionally dies mid-seed (colima flake) — retry.
+    let mut last_err = None;
+    for attempt in 1..=3 {
+        match BlueprintHarness::builder(router())
+            .poll_interval(Duration::from_millis(50))
+            .with_env_var("GPU_INVENTORY_JSON", GPU_INVENTORY)
+            .spawn()
+            .await
+        {
+            Ok(harness) => return Ok(Some(harness)),
+            Err(err) => {
+                if missing_tnt_core_artifacts(&err) {
+                    eprintln!("skipping e2e: {err}");
+                    return Ok(None);
+                }
+                eprintln!("harness boot attempt {attempt}/3 failed: {err}");
+                last_err = Some(err);
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
     }
+    Err(last_err.unwrap())
 }
 
 /// The anvil harness needs Docker. On macOS + colima the socket is NOT at
@@ -84,12 +105,203 @@ fn docker_socket_available() -> bool {
     if host.starts_with("tcp://") {
         return true; // assume reachable; the harness errors clearly if not
     }
-    // Default: bollard's /var/run/docker.sock
     std::path::Path::new("/var/run/docker.sock").exists()
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Vault ABI (mirror of contracts/src/GpuLeaseVault.sol)
+// ─────────────────────────────────────────────────────────────────────────────
+
+sol! {
+    #[sol(rpc)]
+    interface IGpuLeaseVault {
+        function create(address operator, uint128 pricePerSecond, uint64 durationSeconds, bytes32 intentHash, uint8 confidentiality, bytes endpointInfo) external payable returns (bytes32 leaseId);
+        function extend(bytes32 leaseId, uint64 addSeconds) external payable;
+        function release(bytes32 leaseId) external;
+        function reap(bytes32 leaseId) external;
+        function withdrawEarnings() external;
+        function totalEscrowed() external view returns (uint256);
+        function operatorEarnings() external view returns (uint256);
+
+        event LeaseCreated(bytes32 indexed leaseId, address indexed operator, address indexed lessee, uint128 escrow, uint128 pricePerSecond, uint64 expiry, bytes32 intentHash, uint8 confidentiality, bytes endpointInfo, uint16 schemaVersion);
+        event LeaseReleased(bytes32 indexed leaseId, uint128 refund, uint128 operatorTake);
+        event LeaseReaped(bytes32 indexed leaseId, uint128 operatorTake, address caller);
+    }
+}
+
+/// Read-provider against the harness chain with impersonation helpers.
+struct Chain {
+    rpc: String,
+}
+
+impl Chain {
+    async fn new(harness: &BlueprintHarness) -> Self {
+        Self {
+            rpc: harness.environment().http_rpc_endpoint.to_string(),
+        }
+    }
+
+    async fn provider(&self) -> Result<impl Provider> {
+        ProviderBuilder::new()
+            .connect(&self.rpc)
+            .await
+            .context("failed to connect to anvil")
+    }
+
+    async fn raw(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+        let provider = self.provider().await?;
+        let method = method.to_string();
+        provider
+            .raw_request::<_, serde_json::Value>(
+                std::borrow::Cow::Owned(method.clone()),
+                params,
+            )
+            .await
+            .with_context(|| format!("raw_request {method} failed"))
+    }
+
+    /// Anvil impersonation: send transactions FROM any address without its key.
+    async fn impersonate(&self, addr: Address) -> Result<()> {
+        self.raw("anvil_impersonateAccount", serde_json::json!([format!("{addr:#x}")]))
+            .await
+            .map(|_| ())
+    }
+
+    async fn fund(&self, addr: Address) -> Result<()> {
+        self.raw(
+            "anvil_setBalance",
+            serde_json::json!([format!("{addr:#x}"), "0x3635c9adc5dea0000000000"]), // 1e9 ETH
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Warp the chain clock and mine a block.
+    async fn warp(&self, seconds: u64) -> Result<()> {
+        self.raw("evm_increaseTime", serde_json::json!([seconds])).await?;
+        self.raw("evm_mine", serde_json::json!([])).await?;
+        Ok(())
+    }
+
+    async fn send(&self, from: Address, input: Vec<u8>, to: Option<Address>, value: U256) -> Result<()> {
+        let provider = self.provider().await?;
+        let mut tx = TransactionRequest::default();
+        tx.from = Some(from);
+        tx.input = Bytes::from(input).into();
+        tx.value = Some(value);
+        tx.to = to.map(blueprint_sdk::alloy::primitives::TxKind::Call);
+        tx.gas_price = Some(0); // exact-value assertions: no gas noise in deltas
+        let receipt = provider
+            .send_transaction(tx)
+            .await
+            .context("send_transaction failed")?
+            .get_receipt()
+            .await
+            .context("no receipt")?;
+        if !receipt.status() {
+            bail!("transaction reverted");
+        }
+        Ok(())
+    }
+
+    /// Send a tx, decode the first matching event E, and report the ACTUAL
+    /// fee paid (gas_used x effective_gas_price) for exact balance accounting.
+    async fn send_and_decode<E: SolEvent>(
+        &self,
+        from: Address,
+        input: Vec<u8>,
+        to: Option<Address>,
+        value: U256,
+    ) -> Result<(E, U256)> {
+        let provider = self.provider().await?;
+        let mut tx = TransactionRequest::default();
+        tx.from = Some(from);
+        tx.input = Bytes::from(input).into();
+        tx.value = Some(value);
+        tx.to = to.map(blueprint_sdk::alloy::primitives::TxKind::Call);
+        let receipt = provider
+            .send_transaction(tx)
+            .await
+            .context("send_transaction failed")?
+            .get_receipt()
+            .await
+            .context("no receipt")?;
+        if !receipt.status() {
+            bail!("transaction reverted");
+        }
+        let fee = U256::from(receipt.gas_used) * U256::from(receipt.effective_gas_price);
+        for log in receipt.logs() {
+            if let Ok(decoded) = E::decode_log(&log.inner) {
+                return Ok((decoded.data, fee));
+            }
+        }
+        bail!("event {} not found in receipt logs", E::SIGNATURE)
+    }
+
+    async fn balance(&self, addr: Address) -> Result<U256> {
+        let provider = self.provider().await?;
+        Ok(provider.get_balance(addr).await?)
+    }
+
+    /// Latest block timestamp (the chain's clock).
+    async fn timestamp(&self) -> Result<u64> {
+        let provider = self.provider().await?;
+        let block = provider
+            .get_block(alloy_rpc_types::BlockId::latest())
+            .await
+            .context("latest block")?
+            .context("no block")?;
+        Ok(block.header.timestamp)
+    }
+
+    /// I1 on a live chain: vault holds exactly live escrow + unwithdrawn earnings.
+    async fn assert_conservation(&self, vault: Address) -> Result<()> {
+        let provider = self.provider().await?;
+        let total: U256 = IGpuLeaseVault::new(vault, &provider)
+            .totalEscrowed()
+            .call()
+            .await?;
+        let earnings: U256 = IGpuLeaseVault::new(vault, &provider)
+            .operatorEarnings()
+            .call()
+            .await?;
+        let actual = provider.get_balance(vault).await?;
+        anyhow::ensure!(
+            actual == total + earnings,
+            "I1 violated on-chain: balance {actual} != totalEscrowed {total} + earnings {earnings}"
+        );
+        Ok(())
+    }
+}
+
+/// Deploy the real vault bytecode from the foundry artifact.
+async fn deploy_vault(chain: &Chain, deployer: Address) -> Result<Address> {
+    let artifact = std::fs::read_to_string(VAULT_ARTIFACT)
+        .with_context(|| format!("vault artifact missing at {VAULT_ARTIFACT} — run `forge build`"))?;
+    let artifact: serde_json::Value = serde_json::from_str(&artifact)?;
+    let bytecode = artifact["bytecode"]["object"]
+        .as_str()
+        .context("artifact missing bytecode.object")?
+        .trim_start_matches("0x");
+    let bytecode = hex::decode(bytecode).context("bytecode hex")?;
+    let provider = chain.provider().await?;
+    let mut tx = TransactionRequest::default();
+    tx.from = Some(deployer);
+    tx.input = Bytes::from(bytecode).into();
+    let receipt = provider
+        .send_transaction(tx)
+        .await?
+        .get_receipt()
+        .await
+        .context("no deploy receipt")?;
+    Ok(receipt
+        .contract_address
+        .context("deploy receipt missing contract address")?)
+}
+
+/// Extract the LeaseCreated leaseId from the deploy/call receipt's first log.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn runs_gpu_lease_jobs_end_to_end() -> Result<()> {
+async fn gpu_lease_full_lifecycle_end_to_end() -> Result<()> {
     setup_log();
     let guard = HARNESS_LOCK.lock().await;
     let result = timeout(ANVIL_TEST_TIMEOUT, async {
@@ -97,27 +309,67 @@ async fn runs_gpu_lease_jobs_end_to_end() -> Result<()> {
             eprintln!("skipping e2e: docker socket unreachable (on macOS+colima: scripts/run-e2e.sh)");
             return Ok(());
         }
+        if !std::path::Path::new(VAULT_ARTIFACT).exists() {
+            eprintln!("skipping e2e: vault artifact missing — run `forge build` first");
+            return Ok(());
+        }
         let Some(harness) = spawn_harness().await? else {
             return Ok(());
         };
 
-        // The lessee must be the job submitter (SPEC §1 requester binding).
-        let lessee = harness.caller_account();
-        let duration: u64 = 600;
+        let chain = Chain::new(&harness).await;
+
+        // ── Cast: buyer, operator-money-sink, reaper, deployer ────────────
+        let buyer = harness.caller_account();
+        let operator: Address = "0x00000000000000000000000000000000000000b1".parse()?; // money sink
+        let reaper: Address = "0x00000000000000000000000000000000000000b2".parse()?; // permissionless reaper
+        let deployer: Address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".parse()?; // anvil #0
+
+        for addr in [buyer, operator, reaper, deployer] {
+            chain.impersonate(addr).await?;
+            chain.fund(addr).await?;
+        }
+
+        // ── Deploy the real vault on the same chain as the jobs ──────────
+        let vault = deploy_vault(&chain, deployer).await?;
+        eprintln!("vault deployed at {vault:#x}");
+
+        let price: u128 = 1_000; // wei/s
+        let duration: u64 = 600; // seconds
+        let cost = U256::from(price) * U256::from(duration);
+
+        // ── 1. Buyer escrows on the vault ────────────────────────────────
         let class = "h100".to_string();
         let region = "local".to_string();
         let intent = jobs::intent_hash(1, &class, duration, 0, &region);
+        let create_input = IGpuLeaseVault::createCall {
+            operator,
+            pricePerSecond: price,
+            durationSeconds: duration,
+            intentHash: intent.into(),
+            confidentiality: 0,
+            endpointInfo: "{}".into(),
+        }
+        .abi_encode();
+        let (created, _create_fee): (IGpuLeaseVault::LeaseCreated, U256) = chain
+            .send_and_decode(buyer, create_input, Some(vault), cost)
+            .await?;
+        let lease_id = created.leaseId.0;
+        let lease_expiry: u64 = created.expiry;
+        eprintln!("escrowed: leaseId={}", hex::encode(lease_id));
+        chain.assert_conservation(vault).await?;
 
-        // ── LEASE ──────────────────────────────────────────────────────
+        // ── 2. LEASE job through real tnt-core, bound to the vault lease ──
         let request = GpuLeaseRequest {
             intentVersion: 1,
             intentHash: intent.into(),
-            pricePerSecond: 1, // wei/s — the harness chain has no real economy
+            pricePerSecond: price,
             durationSeconds: duration,
             confidentiality: 0,
             gpuClass: class.clone(),
             region: region.clone(),
-            lessee,
+            lessee: buyer,
+            leaseId: lease_id.into(),
         }
         .abi_encode();
 
@@ -139,41 +391,193 @@ async fn runs_gpu_lease_jobs_end_to_end() -> Result<()> {
             "unexpected endpoint transport: {endpoint}"
         );
         anyhow::ensure!(lease_output.schemaVersion == 1, "schema version must be 1");
+        anyhow::ensure!(
+            lease_output.leaseId.0 == lease_id,
+            "job result leaseId must equal the vault leaseId (one identity)"
+        );
         eprintln!(
             "LEASE ok: leaseId={}, endpoint={}",
             hex::encode(lease_output.leaseId),
             lease_output.endpoint
         );
 
-        // ── EXTEND ─────────────────────────────────────────────────────
+        // ── 3. EXTEND: escrow on the vault + job for the session ─────────
+        let add_seconds: u64 = 300;
+        let extend_cost = U256::from(price) * U256::from(add_seconds);
+        chain
+            .send(
+                buyer,
+                IGpuLeaseVault::extendCall {
+                    leaseId: lease_id.into(),
+                    addSeconds: add_seconds,
+                }
+                .abi_encode(),
+                Some(vault),
+                extend_cost,
+            )
+            .await?;
+        chain.assert_conservation(vault).await?;
+
         let extend_request =
-            GpuLeaseExtendRequest { leaseId: lease_output.leaseId, addSeconds: 300 }.abi_encode();
+            GpuLeaseExtendRequest { leaseId: lease_id.into(), addSeconds: add_seconds }.abi_encode();
         let extend_submission = harness
             .submit_job(JOB_EXTEND, Bytes::from(extend_request))
-            .await
-            .context("failed to submit EXTEND job")?;
+            .await?;
         let extend_raw = harness
             .wait_for_job_result_with_deadline(extend_submission, JOB_RESULT_TIMEOUT)
-            .await
-            .context("no EXTEND result")?;
-        let extend_ack = GpuLeaseAck::abi_decode(&extend_raw).context("failed to decode ack")?;
+            .await?;
+        let extend_ack = GpuLeaseAck::abi_decode(&extend_raw)?;
         anyhow::ensure!(extend_ack.state == 0, "EXTEND must keep lease Live");
-        anyhow::ensure!(extend_ack.leaseId == lease_output.leaseId, "wrong leaseId");
-        eprintln!("EXTEND ok");
+        anyhow::ensure!(extend_ack.leaseId.0 == lease_id);
+        eprintln!("EXTEND ok (vault escrow + session)");
 
-        // ── RELEASE ────────────────────────────────────────────────────
-        let release_request = GpuLeaseIdRequest { leaseId: lease_output.leaseId }.abi_encode();
+        // ── 4. Warp 100s, RELEASE: exact pro-rata refund on a live chain ─
+        // The chain's own clock is the truth: anvil advances time per mined
+        // block, so elapsed is measured from the chain, never assumed.
+        chain.warp(100).await?;
+        let now = chain.timestamp().await?;
+        anyhow::ensure!(lease_expiry > now, "warp overshot the expiry");
+        let buyer_before = chain.balance(buyer).await?;
+        let (released, release_fee): (IGpuLeaseVault::LeaseReleased, U256) = chain
+            .send_and_decode(
+                buyer,
+                IGpuLeaseVault::releaseCall { leaseId: lease_id.into() }.abi_encode(),
+                Some(vault),
+                U256::ZERO,
+            )
+            .await?;
+        // Exact against the chain clock: refund == price * (expiry - release_ts).
+        // (expiry includes the extend: created.expiry + addSeconds.)
+        let current_expiry = lease_expiry + add_seconds;
+        anyhow::ensure!(current_expiry > now, "release past expiry?");
+        let expected_refund = U256::from(price) * U256::from(current_expiry - now);
+        let total_paid = U256::from(price) * U256::from(duration + add_seconds);
+        anyhow::ensure!(
+            U256::from(released.refund) + U256::from(released.operatorTake) == total_paid,
+            "I1/I4 violated: refund + take != total paid ({})",
+            total_paid
+        );
+        anyhow::ensure!(
+            U256::from(released.refund) == expected_refund,
+            "I3 violated on-chain: refund {} != {}",
+            released.refund,
+            expected_refund
+        );
+        let buyer_after = chain.balance(buyer).await?;
+        anyhow::ensure!(
+            buyer_after - buyer_before + release_fee == expected_refund,
+            "I3 violated: buyer delta {} + fee {} != exact refund {}",
+            buyer_after - buyer_before,
+            release_fee,
+            expected_refund
+        );
+        eprintln!(
+            "vault RELEASE ok: exact refund {} wei, operator take {} wei",
+            released.refund, released.operatorTake
+        );
+        chain.assert_conservation(vault).await?;
+
+        // RELEASE job settles the routing side.
+        let release_request = GpuLeaseIdRequest { leaseId: lease_id.into() }.abi_encode();
         let release_submission = harness
             .submit_job(JOB_RELEASE, Bytes::from(release_request))
-            .await
-            .context("failed to submit RELEASE job")?;
+            .await?;
         let release_raw = harness
             .wait_for_job_result_with_deadline(release_submission, JOB_RESULT_TIMEOUT)
-            .await
-            .context("no RELEASE result")?;
-        let release_ack = GpuLeaseAck::abi_decode(&release_raw).context("failed to decode ack")?;
+            .await?;
+        let release_ack = GpuLeaseAck::abi_decode(&release_raw)?;
         anyhow::ensure!(release_ack.state == 1, "RELEASE must settle state=Released");
-        eprintln!("RELEASE ok");
+        eprintln!("RELEASE job ok");
+
+        // ── 5. Operator withdraws the exact take ─────────────────────────
+        let operator_before = chain.balance(operator).await?;
+        chain
+            .send(
+                operator,
+                IGpuLeaseVault::withdrawEarningsCall {}.abi_encode(),
+                Some(vault),
+                U256::ZERO,
+            )
+            .await?;
+        let operator_after = chain.balance(operator).await?;
+        anyhow::ensure!(
+            operator_after - operator_before == U256::from(released.operatorTake),
+            "operator withdraw != take"
+        );
+        chain.assert_conservation(vault).await?;
+        eprintln!("operator withdrew {}", operator_after - operator_before);
+
+        // ── 6. Second lease: REAP path (overstay impossible) ─────────────
+        let (created2, _): (IGpuLeaseVault::LeaseCreated, U256) = chain
+            .send_and_decode(
+                buyer,
+                IGpuLeaseVault::createCall {
+                    operator,
+                    pricePerSecond: price,
+                    durationSeconds: duration,
+                    intentHash: intent.into(),
+                    confidentiality: 0,
+                    endpointInfo: "{}".into(),
+                }
+                .abi_encode(),
+                Some(vault),
+                cost,
+            )
+            .await?;
+        let lease2 = created2.leaseId.0;
+
+        // LEASE the second one through tnt-core too.
+        let request2 = GpuLeaseRequest {
+            intentVersion: 1,
+            intentHash: intent.into(),
+            pricePerSecond: price,
+            durationSeconds: duration,
+            confidentiality: 0,
+            gpuClass: class.clone(),
+            region: region.clone(),
+            lessee: buyer,
+            leaseId: lease2.into(),
+        }
+        .abi_encode();
+        let sub2 = harness.submit_job(JOB_LEASE, Bytes::from(request2)).await?;
+        let out2_raw = harness
+            .wait_for_job_result_with_deadline(sub2, JOB_RESULT_TIMEOUT)
+            .await?;
+        let out2 = GpuLeaseOutput::abi_decode(&out2_raw)?;
+        anyhow::ensure!(out2.leaseId.0 == lease2, "second lease identity mismatch");
+
+        // Warp past expiry; ANYONE reaps — full remaining escrow to operator.
+        chain.warp(duration + 60).await?;
+        let (reaped, _): (IGpuLeaseVault::LeaseReaped, U256) = chain
+            .send_and_decode(
+                reaper,
+                IGpuLeaseVault::reapCall { leaseId: lease2.into() }.abi_encode(),
+                Some(vault),
+                U256::ZERO,
+            )
+            .await?;
+        anyhow::ensure!(
+            U256::from(reaped.operatorTake) == cost,
+            "reap must pay the full escrow"
+        );
+        chain.assert_conservation(vault).await?;
+
+        // REAP job settles the routing side (state=2).
+        let reap_request = GpuLeaseIdRequest { leaseId: lease2.into() }.abi_encode();
+        let reap_submission = harness.submit_job(JOB_REAP, Bytes::from(reap_request)).await?;
+        let reap_raw = harness
+            .wait_for_job_result_with_deadline(reap_submission, JOB_RESULT_TIMEOUT)
+            .await?;
+        let reap_ack = GpuLeaseAck::abi_decode(&reap_raw)?;
+        anyhow::ensure!(reap_ack.state == 2, "REAP must settle state=Reaped");
+        eprintln!(
+            "REAP ok: permissionless full take {} wei via {:#x}",
+            reaped.operatorTake, reaper
+        );
+
+        // Final conservation after the whole lifecycle.
+        chain.assert_conservation(vault).await?;
+        eprintln!("I1 held on-chain through the entire lifecycle");
 
         harness.shutdown().await;
         Ok(())

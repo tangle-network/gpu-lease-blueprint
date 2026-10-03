@@ -11,8 +11,6 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tiny_keccak::{Hasher, Keccak};
-
 #[derive(Debug, thiserror::Error)]
 pub enum AllocatorError {
     #[error("no idle device of class {class} (tee={tee}) available")]
@@ -202,18 +200,6 @@ pub fn endpoint_descriptor_v1(device: &GpuDevice) -> String {
         "device": device.cuda_ordinal,
     })
     .to_string()
-}
-
-/// Deterministic operator-side leaseId: binds intent, lessee, and a
-/// monotonic nonce. The on-chain record binds the same intentHash (I5).
-pub fn derive_lease_id(intent_hash: [u8; 32], lessee: &str, nonce: u64) -> [u8; 32] {
-    let mut k = Keccak::v256();
-    k.update(&intent_hash);
-    k.update(lessee.as_bytes());
-    k.update(&nonce.to_be_bytes());
-    let mut out = [0u8; 32];
-    k.finalize(&mut out);
-    out
 }
 
 pub fn unix_now() -> u64 {

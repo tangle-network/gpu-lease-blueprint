@@ -53,6 +53,7 @@ contract GpuLeaseBlueprint is BlueprintServiceManagerBase {
         string gpuClass;
         string region;
         address lessee; // SPEC §1: the RFQ quote binds the requester
+        bytes32 leaseId; // the vault lease the buyer already escrowed — one identity across money and routing
     }
 
     struct GpuLeaseOutput {

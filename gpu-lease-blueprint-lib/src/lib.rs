@@ -44,8 +44,11 @@ sol! {
         uint8 confidentiality;
         string gpuClass;
         string region;
-        /// SPEC §1: the RFQ quote binds the requester — mirrored on-chain here.
+        /// SPEC §1: the RFQ quote binds the requester.
         address lessee;
+        /// The vault lease the buyer already created and escrowed — one
+        /// identity across money and routing (operator binds to THIS id).
+        bytes32 leaseId;
     }
 
     /// LEASE job output — PUBLIC DATA ONLY (SPEC §2 Credentials).

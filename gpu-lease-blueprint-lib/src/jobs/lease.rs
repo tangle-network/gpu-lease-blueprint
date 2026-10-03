@@ -71,10 +71,9 @@ pub fn allocate(request: &GpuLeaseRequest, caller: &str) -> Result<GpuLeaseOutpu
         return Err(LeaseError::RequesterMismatch { caller: caller.to_string(), lessee });
     }
 
-    // Deterministic leaseId: binds intent + lessee + operator monotonic nonce.
-    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let lease_id = crate::allocator::derive_lease_id(actual, &lessee, nonce);
+    // The leaseId is the VAULT's (buyer created + escrowed it); the operator
+    // binds the device to that identity. Unknown ids fail in the allocator.
+    let lease_id: [u8; 32] = request.leaseId.into();
 
     let alloc = crate::allocator().acquire(
         &request.gpuClass,
@@ -122,9 +121,7 @@ mod tests {
                 expected: hex::encode(expected),
             });
         }
-        static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let lease_id = crate::allocator::derive_lease_id(actual, caller, nonce);
+        let lease_id: [u8; 32] = request.leaseId.into();
         let alloc = a.acquire(
             &request.gpuClass,
             request.confidentiality > 0,
@@ -152,6 +149,7 @@ mod tests {
             gpuClass: class,
             region,
             lessee: "0x0000000000000000000000000000000000000042".parse().unwrap(),
+            leaseId: [7u8; 32].into(),
         }
     }
 

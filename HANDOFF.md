@@ -20,13 +20,26 @@ New this session:
      order pinned to the Rust router).
    - 11 tnt-core integration tests (foundry): routing, all fail-closed paths,
      vault-money+BSM-routing full lifecycle. **forge test: 46/46.**
-2. **E2E on local tnt-core (the real proof):**
+2. **E2E on local tnt-core — now the FULL money+job lifecycle:**
    `gpu-lease-blueprint-lib/tests/anvil.rs` — `BlueprintHarness` boots an anvil
    container seeded from the bundled LocalTestnet broadcast (full Tangle stack),
-   runs the REAL BlueprintRunner with our router, and submits jobs ON-CHAIN:
-   LEASE → GpuLeaseOutput{leaseId, endpoint v1, schemaVersion=1} → EXTEND →
-   RELEASE. **`./scripts/run-e2e.sh` → green in ~2s.** Skips gracefully without
-   Docker so `cargo test --workspace` stays green anywhere.
+   runs the REAL BlueprintRunner with our router, AND deploys the REAL vault
+   bytecode (from `forge build` artifacts) on the same chain. Proven end-to-end:
+   buyer escrows (vault.create) → LEASE job (request carries the VAULT leaseId;
+   result echoes it — ONE identity across money and routing) → EXTEND (vault
+   escrow + job session) → anvil time-warp → vault.release with EXACT pro-rata
+   refund (fee-accounted balance assertions) → RELEASE job → operator withdraws
+   the exact take → second lease → warp past expiry → permissionless vault.reap
+   (full take via a third party) → REAP job. **I1 conservation asserted
+   on-chain after every step.** `./scripts/run-e2e.sh` → green (~3s, boot
+   retried x3 for colima flakes). Skips gracefully without Docker/artifacts.
+
+   Design completion this session: `GpuLeaseRequest` carries `leaseId` — the
+   vault lease the buyer already escrowed. The operator binds the device to
+   THAT id (own derive_lease_id removed), the result echoes it, and the BSM
+   cross-checks it against the vault. Bug found+fixed by the E2E: reap.rs
+   double-released the allocator lease (UnknownLease) — now single-release,
+   idempotent.
 
 ## Continuation point (in order)
 

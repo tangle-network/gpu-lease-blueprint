@@ -17,7 +17,7 @@ Designed so the only future churn is dependency updates.
 | Registration `contracts/script/RegisterGpuLeaseBlueprint.s.sol` | **DONE** — tnt-core `createBlueprint` w/ 4 job definitions | compiles; job order pinned to Rust constants |
 | Rust lib `gpu-lease-blueprint-lib/` | **DONE** — allocator, quote policy, EIP-191 credentials, 4 jobs | `cargo test -p gpu-lease-blueprint-lib` → 28/28 |
 | Rust bin `gpu-lease-blueprint-bin/` | **COMPILES** — runner + periodic reaper sweep wired | `cargo check --workspace` clean |
-| **tnt-core E2E on local anvil** | **DONE** — LEASE→EXTEND→RELEASE through real tnt-core (seeded anvil container, real BlueprintRunner, on-chain job results) | `./scripts/run-e2e.sh` → 1/1 green in ~2s |
+| **tnt-core E2E on local anvil** | **DONE — full money+job lifecycle**: vault deployed from forge artifacts on the seeded chain; escrow → LEASE → EXTEND → exact-refund RELEASE → withdraw → permissionless REAP; I1 asserted on-chain after every step; ONE leaseId across money and routing | `./scripts/run-e2e.sh` → green (~3s) |
 | SDK `gpuLease` resolver | **NOT STARTED** — lives in sandbox-sdk repo | SPEC §5 |
 | External audit | **NOT STARTED** — before mainnet money, non-negotiable | SPEC §6.4 |
 
