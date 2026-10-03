@@ -1,4 +1,4 @@
 out/
 cache/
 target/
-Dependencies: foundry-rs/forge-std
+dependencies/

@@ -1,72 +1,64 @@
 # GPU Lease Blueprint — Session Handoff
 
 **Repo:** https://github.com/tangle-network/gpu-lease-blueprint
-**Date:** 2026-10-03 · **Author:** drewstone (session agent)
+**Date:** 2026-10-03 (updated after the completion session)
 **Spec:** `SPEC.md` in the repo root — read it first; it is frozen design law.
 
-## Where we are
+## Where we are — UPDATED: the two "next steps" from the last handoff are DONE
 
-The marketplace crypto core was proven end-to-end in the prior session (operator signs RFQ quote
-→ buyer validates → tnt-core accepts on a live anvil chain — blueprint#1568, merged). This repo is
-the next product: the bare-bones GPU-lessor blueprint.
+The last handoff said the contract wasn't done until its tests said so. They now say so:
 
-Pushed so far:
-- `SPEC.md` — the supreme design. Contract = fixed point of invariants (I1 escrow conservation,
-  I2 overstay impossibility, I3 refund atomicity, I4 single settlement, I5 quote binding).
-  Everything evolving (pricing, GPU generations, attach transports) is off-chain versioned data.
-- `src/GpuLeaseVault.sol` — frozen-core skeleton: create/extend/release/reap/slash, operator
-  earnings withdrawal, schema-versioned events carrying public data only.
+1. **Contract + invariant suite: DONE.** `_settle()` placeholder is gone — real exact
+   pro-rata (`refund = price * remaining`, exact because `escrow == price * paidSeconds`
+   by construction; derivation pinned by fuzz). 35/35 Foundry tests green at 1000 fuzz
+   runs: I1 conservation after every step (vault-empty terminal states), I2 overstay
+   impossibility mid-flight, I3 exact refunds, I4 single settlement (all four orderings),
+   I5 record immutability. Also fixed en route: `foundry.toml` `libs` string→array (was
+   broken from the first commit), uint64/uint128 overflows now fail closed with
+   `Overflow()` instead of `Panic(0x11)`, overpay refunded at call boundaries so I1
+   holds exactly, double `LeaseReleased` emit removed.
+2. **The Rust blueprint EXISTS now.** Full workspace mirroring
+   `ai-agent-sandbox-blueprint`'s proven structure (same SDK pin, `[patch.crates-io]` →
+   tangle-network/blueprint rev `5405c01`):
+   - `gpu-lease-blueprint-lib/` — 28/28 tests: co-located **allocator** (class/TEE-
+     exclusive binding, reap sweep), **quote policy** (per-class base, class bps, TEE
+     premium, piecewise utilization curve, fail-closed redeemed-price ceiling),
+     **EIP-191 challenge-session credentials** (single-use challenges, signer recovery,
+     scoped expiring tokens, lease-bound revocation), and the four SPEC §1 jobs
+     (LEASE=0/RELEASE=1/EXTEND=2/REAP=3) as extractor-style handlers with public-data-only
+     outputs + `router()`.
+   - `gpu-lease-blueprint-bin/` — `BlueprintRunner` wiring + 30s reaper sweep
+     (frees devices/revokes credentials at escrow exhaustion — the operator side of I2).
+     Compiles clean; NOT yet run against a live chain.
+3. `script/DeployGpuLeaseVault.s.sol` — vault deploy script (anvil default key).
 
-## THE CRITICAL ITEM — start here
+## Continuation point (in order)
 
-**`_settle()` in GpuLeaseVault.sol contains PLACEHOLDER pro-rata math.** It is marked in-code.
-It is wrong-by-design until the test suite exists. Do not deploy, do not wire money, do not
-"quick-fix" it blind. The next session's first deliverable:
+1. **tnt-core registration**: write `RegisterBlueprint` for the 4 jobs (import tnt-core
+   `Types.sol`, mirror `ai-agent-sandbox-blueprint/contracts/script/RegisterBlueprint.s.sol`).
+   Job IDs are pinned in `gpu-lease-blueprint-lib/src/lib.rs` (0–3, sequential).
+2. **Live smoke test**: anvil chain + `blueprint-anvil-testing-utils` (sibling has the
+   harness) — LEASE→EXTEND→RELEASE happy path end-to-end, verify vault accounting on the
+   result path. This is where bin bugs (if any) surface.
+3. **SDK `gpuLease` resolver** (sandbox-sdk repo, SPEC §5): create sandbox → collect N
+   quotes → validate (#1568 client) → LEASE → attach via endpoint v1 → teardown w/ refund.
+4. **Audit** before mainnet money (SPEC §6.4 — non-negotiable).
 
-### 1. The invariant-pinning Foundry test suite (`test/GpuLeaseVault.t.sol`)
+## Known-not-done (do NOT claim otherwise)
 
-Write tests that pin, at minimum:
-- I1: for fuzzed (pricePerSecond, duration, extend-times, release-times):
-  `operatorEarnings + Σ live escrow + refunded == totalEscrowed` at every step.
-- I2: no state where `expiry - now` exceeds `escrow / pricePerSecond`.
-- I3: release refunds EXACTLY `escrow × remainingSeconds / paidSeconds`, atomically.
-- I4: release-then-reap and reap-then-release both revert (`NotLive`).
-- I5: intentHash/operator/lessee immutable (attempt mutation → impossible; struct fields are
-  only written at `create`).
-- Edge: price=0, duration=0, value<cost, expiry overflow at type boundaries.
+- Bin has never connected to a chain — registration + smoke test are the proof it needs.
+- No `RegisterBlueprint` yet — nothing is registered anywhere.
+- The allocator is in-memory per-process (fine for v1 single-operator; multi-process
+  needs the local-database store, `blueprint-store-local-database` is in the patch set).
+- Reap-sweep interval (30s) is hardcoded in `bin/src/main.rs` — env-ify when it matters.
 
-Then implement the real pro-rata in `_settle` and keep the placeholder tests red-then-green.
-Storage note: exact pro-rata needs paidSeconds tracked (or derive: `escrow/price` at settle
-undercounts after extends — decide derivation vs. explicit field; the tests decide, not taste).
+## Environment notes (carried forward)
 
-### 2. Then, in order (SPEC §6)
-- Operator allocator (co-located GPU passthrough) + quote policy — copy the composable
-  env-driven policy from ai-agent-sandbox-blueprint `operator_quote.rs` (#177, merged).
-- Credentials off-chain via EIP-191 session auth — machinery exists and is proven
-  (operator-api session_auth). NEVER in results/events (SPEC §2; the bug class we killed).
-- SDK `gpuLease` resolver: collect N quotes → validate (TS rfq.ts, proven) → LEASE → attach →
-  RELEASE/REAP. Multi-quote failover is the scheduler (no chain-side scheduler).
-- External audit before mainnet. Non-negotiable.
-
-## Environment facts that cost time last session — read once, save an hour
-
-- **macOS cannot build** `sandbox-runtime`/`ai-agent-sandbox-blueprint-bin` (microvm-runtime nix
-  mknod i32/u64). Verify Rust against the blueprint repo or CI; `--no-verify` with rationale.
-- **Docker via colima**: restart with `colima start --cpu 6 --memory 10`. The harness needs
-  `DOCKER_HOST=unix:///Users/drew/.colima/default/docker.sock` AND `TMPDIR=/Users/drew/.tmp-bp-anvil/`
-  (colima doesn't mount /var/folders).
-- **The anvil snapshot harness**: `cargo test -p blueprint-tangle-extra --features keepers --test
-  anvil_integration <name>` with the env above boots real anvil containers against
-  `crates/chain-setup/anvil/snapshots/localtestnet-state.json`.
-- Seeded service allowlists its owner (deployer key `0xac09…ff80`) — buyer must be the owner or
-  permitted caller (`NotPermittedCaller(uint64,address)` = `0xd5dd5b44`).
-- `rg -rn` is replace-not-recursive; `cd` does not persist between tool calls.
-
-## Related merged work this week (context for reviewers)
-
-- blueprint#1565/#1567: canonical RFQ digest fixtures + live generator (parity pinned both sides)
-- blueprint#1568: `submit_job_from_quote` event-parse fix + the live chain proof test
-- sandbox-blueprint#177: operator `/api/quote` + `/api/capabilities` (liquid pricing)
-- adc#8844/#8896: TS RFQ client + Rust→TS interop proof
-- Outstanding debt (tracked, not blocking): full operator e2e via docker-compose; adc dependabot
-  majors; blueprint #175 credentials-off-chain implementation
+- `forge install foundry-rs/forge-std --no-commit` after fresh clone (`dependencies/` is
+  gitignored; forge-std v1.17.0 pinned by the install).
+- Rust toolchain: 1.91 (`rust-toolchain.toml`), same as the sibling repo.
+- The SDK graph patch section must stay in sync with
+  `ai-agent-sandbox-blueprint/Cargo.toml` — it's the proven-resolution pin.
+- Foundry config: `libs = ["dependencies"]` (ARRAY — the string form breaks forge 1.8).
+- vm.expectRevert gotcha that cost time: an unfunded caller's `{value:...}` call fails
+  the EVM-level balance check → empty revert data, NOT the contract's custom error.

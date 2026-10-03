@@ -1,0 +1,17 @@
+[package]
+name = "gpu-lease-blueprint-bin"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gpu-lease-blueprint"
+path = "src/main.rs"
+
+[dependencies]
+gpu-lease-blueprint-lib = { path = "../gpu-lease-blueprint-lib" }
+blueprint-sdk = { version = "=0.2.0-alpha.12", default-features = false, features = ["std", "tangle"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
