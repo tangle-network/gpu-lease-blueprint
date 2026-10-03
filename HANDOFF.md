@@ -41,6 +41,27 @@ New this session:
    double-released the allocator lease (UnknownLease) — now single-release,
    idempotent.
 
+## NEW: operator HTTP API (done this session — the UI's fuel)
+
+- `gpu-lease-blueprint-lib/src/api.rs` — the five surfaces: GET /api/capabilities
+  (kind/classes/prices/LIVE idle counts), POST /api/quote (policy math + intentHash
+  + utilization "why"), GET /api/leases/:id (public data ONLY), POST
+  /api/session/challenge + /api/session/verify (EIP-191; credential dies with the
+  lease's session expiry). camelCase JSON per the platform doc. Injectable
+  ApiState for tests; `operator_api_router()` for the product path. The bin
+  serves it (OPERATOR_API_PORT, default 9100) alongside the runner.
+- E2E leg (in run-e2e.sh): live operator's own state — idle count flips to 0
+  after LEASE, quote == saturated policy math (3.6e14 wei/s), lease status
+  reflects the running allocation, zero credential leakage.
+- TWO real bugs found by tests and fixed:
+  1. credentials: a FAILED signature attempt burned the nonce (challenge was
+     removed before verification) — now single-use only on SUCCESS.
+  2. **UB that SIGSEGV'd the E2E**: a `transmute<&'static T, Arc<T>>` produced a
+     fake Arc whose drop corrupted the global allocator's mutex (fault at 0x4).
+     Root cause of the silent-fix failure: cargo fmt had reformatted the code so
+     python replacements no-opped. Globals now return real `Arc` handles.
+     LESSON: after any scripted edit, grep-verify the change landed.
+
 ## NEW: canonical metadata + driver round-trip (done this session)
 
 - `gpu-lease-blueprint-gen` — THE single-truth flow: Rust `sol!` types →

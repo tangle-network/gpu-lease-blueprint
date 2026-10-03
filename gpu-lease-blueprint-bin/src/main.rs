@@ -44,6 +44,25 @@ async fn main() -> Result<(), blueprint_sdk::Error> {
 
     let tangle_producer = TangleProducer::new(tangle_client.clone(), service_id);
 
+    // Operator HTTP API — the UI's fuel (capabilities/quotes/lease status/
+    // EIP-191 sessions). State-changing ops stay on-chain via the driver.
+    let api_port: u16 = std::env::var("OPERATOR_API_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9100);
+    let api_listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{api_port}"))
+        .await
+        .map_err(|e| blueprint_sdk::Error::Other(format!("operator API bind :{api_port}: {e}")))?;
+    info!(port = api_port, "operator API listening");
+    tokio::spawn(async move {
+        axum::serve(
+            api_listener,
+            gpu_lease_blueprint_lib::api::operator_api_router(),
+        )
+        .await
+        .ok();
+    });
+
     // Periodic sweep: free devices + revoke credentials at escrow exhaustion.
     // Interval is operator policy (SPEC §2) — default 30s, tighter for local dev.
     let sweep_secs: u64 = std::env::var("REAPER_SWEEP_INTERVAL_SECS")

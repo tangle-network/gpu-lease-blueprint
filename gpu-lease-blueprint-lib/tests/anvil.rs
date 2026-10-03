@@ -19,17 +19,17 @@
 //! Requires Docker (colima). Skips gracefully when Docker/artifacts are
 //! missing — use `scripts/run-e2e.sh` for the proven invocation.
 
+use alloy_rpc_types::TransactionRequest;
 use anyhow::{Context, Result, bail};
 use blueprint_anvil_testing_utils::{BlueprintHarness, missing_tnt_core_artifacts};
 use blueprint_sdk::alloy::primitives::{Address, Bytes, U256};
 use blueprint_sdk::alloy::providers::{Provider, ProviderBuilder};
-use alloy_rpc_types::TransactionRequest;
 use blueprint_sdk::alloy::sol;
 use blueprint_sdk::alloy::sol_types::{SolCall, SolEvent, SolValue};
 use gpu_lease_blueprint_lib::jobs;
 use gpu_lease_blueprint_lib::{
     GpuLeaseAck, GpuLeaseExtendRequest, GpuLeaseIdRequest, GpuLeaseOutput, GpuLeaseRequest,
-    JOB_EXTEND, JOB_LEASE, JOB_RELEASE, JOB_REAP, router,
+    JOB_EXTEND, JOB_LEASE, JOB_REAP, JOB_RELEASE, router,
 };
 use once_cell::sync::Lazy;
 use std::time::Duration;
@@ -201,7 +201,9 @@ fn vault_placeholder() -> Address {
 
 fn deployer_for_registration() -> Address {
     // anvil #0 — the LocalTestnet deployer that originally registered blueprint 0.
-    "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".parse().unwrap()
+    "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
+        .parse()
+        .unwrap()
 }
 
 fn keccak256(data: &[u8]) -> [u8; 32] {
@@ -257,19 +259,19 @@ impl Chain {
         let provider = self.provider().await?;
         let method = method.to_string();
         provider
-            .raw_request::<_, serde_json::Value>(
-                std::borrow::Cow::Owned(method.clone()),
-                params,
-            )
+            .raw_request::<_, serde_json::Value>(std::borrow::Cow::Owned(method.clone()), params)
             .await
             .with_context(|| format!("raw_request {method} failed"))
     }
 
     /// Anvil impersonation: send transactions FROM any address without its key.
     async fn impersonate(&self, addr: Address) -> Result<()> {
-        self.raw("anvil_impersonateAccount", serde_json::json!([format!("{addr:#x}")]))
-            .await
-            .map(|_| ())
+        self.raw(
+            "anvil_impersonateAccount",
+            serde_json::json!([format!("{addr:#x}")]),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn fund(&self, addr: Address) -> Result<()> {
@@ -283,12 +285,19 @@ impl Chain {
 
     /// Warp the chain clock and mine a block.
     async fn warp(&self, seconds: u64) -> Result<()> {
-        self.raw("evm_increaseTime", serde_json::json!([seconds])).await?;
+        self.raw("evm_increaseTime", serde_json::json!([seconds]))
+            .await?;
         self.raw("evm_mine", serde_json::json!([])).await?;
         Ok(())
     }
 
-    async fn send(&self, from: Address, input: Vec<u8>, to: Option<Address>, value: U256) -> Result<()> {
+    async fn send(
+        &self,
+        from: Address,
+        input: Vec<u8>,
+        to: Option<Address>,
+        value: U256,
+    ) -> Result<()> {
         let provider = self.provider().await?;
         let mut tx = TransactionRequest::default();
         tx.from = Some(from);
@@ -381,8 +390,9 @@ impl Chain {
 
 /// Deploy the real vault bytecode from the foundry artifact.
 async fn deploy_vault(chain: &Chain, deployer: Address) -> Result<Address> {
-    let artifact = std::fs::read_to_string(VAULT_ARTIFACT)
-        .with_context(|| format!("vault artifact missing at {VAULT_ARTIFACT} — run `forge build`"))?;
+    let artifact = std::fs::read_to_string(VAULT_ARTIFACT).with_context(|| {
+        format!("vault artifact missing at {VAULT_ARTIFACT} — run `forge build`")
+    })?;
     let artifact: serde_json::Value = serde_json::from_str(&artifact)?;
     let bytecode = artifact["bytecode"]["object"]
         .as_str()
@@ -405,8 +415,22 @@ async fn deploy_vault(chain: &Chain, deployer: Address) -> Result<Address> {
 }
 
 /// Extract the LeaseCreated leaseId from the deploy/call receipt's first log.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn gpu_lease_full_lifecycle_end_to_end() -> Result<()> {
+#[test]
+fn gpu_lease_full_lifecycle_end_to_end() {
+    // Deep async poll chains (harness + giant test future) overflow tokio's
+    // default 2MB worker stacks — build the runtime with real headroom.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(64 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .expect("runtime");
+    if let Err(e) = rt.block_on(gpu_lease_full_lifecycle_end_to_end_inner()) {
+        panic!("e2e failed: {e:?}");
+    }
+}
+
+async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
     setup_log();
     let guard = HARNESS_LOCK.lock().await;
     let result = timeout(ANVIL_TEST_TIMEOUT, async {
@@ -633,6 +657,106 @@ async fn gpu_lease_full_lifecycle_end_to_end() -> Result<()> {
             .context("no LEASE result")?;
         let lease_output = GpuLeaseOutput::abi_decode(&lease_output_raw)
             .context("failed to decode GpuLeaseOutput")?;
+
+        // ── Operator API leg: the UI's fuel, live against the running
+        //    operator's own state (globals seeded by the harness env).
+        //    Raw HTTP over TcpStream: no extra HTTP client dependency. ────
+        {
+            use gpu_lease_blueprint_lib::api::operator_api_router;
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let api_port = listener.local_addr().unwrap().port();
+            tokio::spawn(async move {
+                axum::serve(listener, operator_api_router()).await.ok();
+            });
+            let base = format!("127.0.0.1:{api_port}");
+
+            async fn http_json(method: &str, base: &str, path: &str, body: Option<&str>) -> Result<serde_json::Value> {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut stream = tokio::net::TcpStream::connect(base).await?;
+                let body_bytes = body.map(|b| b.as_bytes().to_vec()).unwrap_or_default();
+                let req = format!(
+                    "{method} {path} HTTP/1.1\r\nHost: {base}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body_bytes.len()
+                );
+                stream.write_all(req.as_bytes()).await?;
+                stream.write_all(&body_bytes).await?;
+                let mut raw = Vec::new();
+                stream.read_to_end(&mut raw).await?;
+                let text = String::from_utf8_lossy(&raw);
+                let body_start = text.find("\r\n\r\n").context("malformed response")? + 4;
+                let payload = &text[body_start..];
+                // Handle chunked responses by extracting the first JSON value.
+                let start = payload.find('{').context("no json")?;
+                let mut depth = 0i32;
+                let mut end = start;
+                for (i, c) in payload[start..].char_indices() {
+                    match c {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = start + i + 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(serde_json::from_str(&payload[start..end])?)
+            }
+
+            // Wait for readiness.
+            let mut ready = false;
+            for _ in 0..50 {
+                if http_json("GET", &base, "/api/capabilities", None).await.is_ok() {
+                    ready = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            anyhow::ensure!(ready, "operator API not ready");
+
+            // Capabilities: the leased class now shows zero idle h100 devices.
+            let caps = http_json("GET", &base, "/api/capabilities", None).await?;
+            let h100 = caps["compute"]["classes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == "h100")
+                .context("h100 class missing")?;
+            anyhow::ensure!(h100["idleCount"] == 0, "device should be busy after LEASE");
+
+            // Quote: live math from the hot-reloadable policy (saturated => +20%).
+            let quote = http_json(
+                "POST",
+                &base,
+                "/api/quote",
+                Some(r#"{"gpuClass":"h100","durationSeconds":600}"#),
+            )
+            .await?;
+            let expected = 300_000_000_000_000u128 * 12_000 / 10_000;
+            anyhow::ensure!(
+                quote["pricePerSecond"].as_str() == Some(&expected.to_string()),
+                "quote {quote:?} != saturated policy price {expected}"
+            );
+
+            // Lease status: public data only, reflects the live allocation.
+            let status = http_json(
+                "GET",
+                &base,
+                &format!("/api/leases/{}", hex::encode(lease_id)),
+                None,
+            )
+            .await?;
+            anyhow::ensure!(status["deviceId"] == "gpu-0", "status device: {status}");
+            anyhow::ensure!(status["expiresAt"].as_u64().unwrap() > 0);
+            let raw = status.to_string();
+            anyhow::ensure!(!raw.contains("token") && !raw.contains("secret"), "credential leak");
+            eprintln!(
+                "operator API leg ok: quote {} wei/s, status device={}",
+                quote["pricePerSecond"], status["deviceId"]
+            );
+        }
 
         let endpoint: serde_json::Value =
             serde_json::from_str(&lease_output.endpoint).context("endpoint must be json")?;

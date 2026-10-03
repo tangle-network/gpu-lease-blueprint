@@ -1697,6 +1697,7 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -1715,6 +1716,7 @@ dependencies = [
  "sync_wrapper",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -4129,6 +4131,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 name = "gpu-lease-blueprint-bin"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "blueprint-sdk",
  "gpu-lease-blueprint-lib",
  "tokio",
@@ -4152,6 +4155,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-rpc-types",
  "anyhow",
+ "axum",
  "base64 0.22.1",
  "blueprint-anvil-testing-utils",
  "blueprint-sdk",
@@ -4163,6 +4167,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tiny-keccak",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber 0.3.23",
 ]

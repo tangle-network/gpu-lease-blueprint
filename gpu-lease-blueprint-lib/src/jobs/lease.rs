@@ -32,7 +32,9 @@ pub enum LeaseError {
     IntentHashMismatch { actual: String, expected: String },
     #[error("unsupported intent version {0} (fail closed, SPEC §3)")]
     UnknownIntentVersion(u8),
-    #[error("requester mismatch: job submitter {caller} is not the lessee the quote bound {lessee}")]
+    #[error(
+        "requester mismatch: job submitter {caller} is not the lessee the quote bound {lessee}"
+    )]
     RequesterMismatch { caller: String, lessee: String },
     #[error(transparent)]
     Allocator(#[from] AllocatorError),
@@ -68,7 +70,10 @@ pub fn allocate(request: &GpuLeaseRequest, caller: &str) -> Result<GpuLeaseOutpu
     // The lessee the quote bound must be the job submitter (SPEC §1 requester binding).
     let lessee = format!("{:#x}", request.lessee);
     if lessee != caller {
-        return Err(LeaseError::RequesterMismatch { caller: caller.to_string(), lessee });
+        return Err(LeaseError::RequesterMismatch {
+            caller: caller.to_string(),
+            lessee,
+        });
     }
 
     // The leaseId is the VAULT's (buyer created + escrowed it); the operator
@@ -148,7 +153,9 @@ mod tests {
             confidentiality: 0,
             gpuClass: class,
             region,
-            lessee: "0x0000000000000000000000000000000000000042".parse().unwrap(),
+            lessee: "0x0000000000000000000000000000000000000042"
+                .parse()
+                .unwrap(),
             leaseId: [7u8; 32].into(),
         }
     }

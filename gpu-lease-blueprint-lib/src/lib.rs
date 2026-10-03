@@ -8,6 +8,7 @@
 //! and are pinned by `test/GpuLeaseVault.t.sol`.
 
 pub mod allocator;
+pub mod api;
 pub mod credentials;
 pub mod jobs;
 pub mod quote;
@@ -90,15 +91,19 @@ pub fn router() -> Router {
 }
 
 /// Operator-wide allocator (co-located inventory; no on-chain registry — SPEC §4).
-pub fn allocator() -> &'static GpuAllocator {
-    static ALLOCATOR: once_cell::sync::OnceCell<GpuAllocator> = once_cell::sync::OnceCell::new();
-    ALLOCATOR.get_or_init(GpuAllocator::from_env)
+/// Operator-wide allocator (co-located inventory; no on-chain registry — SPEC §4).
+/// Returns a shared `Arc` handle — safe to hold in extractors/tasks.
+pub fn allocator() -> std::sync::Arc<GpuAllocator> {
+    static ALLOCATOR: once_cell::sync::OnceCell<std::sync::Arc<GpuAllocator>> =
+        once_cell::sync::OnceCell::new();
+    std::sync::Arc::clone(ALLOCATOR.get_or_init(|| std::sync::Arc::new(GpuAllocator::from_env())))
 }
 
 /// Operator-wide credential session store.
-pub fn credentials() -> &'static CredentialSessions {
-    static CREDS: once_cell::sync::OnceCell<CredentialSessions> = once_cell::sync::OnceCell::new();
-    CREDS.get_or_init(CredentialSessions::new)
+pub fn credentials() -> std::sync::Arc<CredentialSessions> {
+    static CREDS: once_cell::sync::OnceCell<std::sync::Arc<CredentialSessions>> =
+        once_cell::sync::OnceCell::new();
+    std::sync::Arc::clone(CREDS.get_or_init(|| std::sync::Arc::new(CredentialSessions::new())))
 }
 
 #[cfg(test)]

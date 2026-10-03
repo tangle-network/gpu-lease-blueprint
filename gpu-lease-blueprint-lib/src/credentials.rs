@@ -153,13 +153,17 @@ impl CredentialSessions {
         signature_rsv_hex: &str,
         expires_at: u64,
     ) -> Result<ScopedCredential, CredentialError> {
+        // Peek without consuming: a FAILED verification (bad signature) must
+        // not burn the nonce — only success is single-use. Expiry burns it.
         let challenge = {
             let mut st = self.state.lock().expect("credentials poisoned");
             let c = st
                 .challenges
-                .remove(&challenge_nonce)
+                .get(&challenge_nonce)
+                .cloned()
                 .ok_or(CredentialError::UnknownChallenge)?;
             if unix_now() > c.expires_at {
+                st.challenges.remove(&challenge_nonce);
                 return Err(CredentialError::ChallengeExpired);
             }
             c
@@ -172,6 +176,12 @@ impl CredentialSessions {
                 recovered,
             });
         }
+        // Success => the nonce is spent (single-use).
+        self.state
+            .lock()
+            .expect("credentials poisoned")
+            .challenges
+            .remove(&challenge_nonce);
 
         // Mint token: keccak(lease || nonce || counter) — unguessable without
         // holding the operator's view; bearer-use confined to this operator.
@@ -197,6 +207,16 @@ impl CredentialSessions {
             .credentials
             .insert(token, cred.clone());
         Ok(cred)
+    }
+
+    /// Which lease a pending challenge is bound to (for credential lifetime).
+    pub fn challenge_lease(&self, nonce: [u8; 32]) -> Option<[u8; 32]> {
+        self.state
+            .lock()
+            .expect("credentials poisoned")
+            .challenges
+            .get(&nonce)
+            .map(|c| c.lease_id)
     }
 
     /// Bearer check: valid, unexpired, unrevoked.

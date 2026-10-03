@@ -17,6 +17,7 @@ Designed so the only future churn is dependency updates.
 | Registration `contracts/script/RegisterGpuLeaseBlueprint.s.sol` | **DONE** — tnt-core `createBlueprint` w/ 4 job definitions | compiles; job order pinned to Rust constants |
 | Rust lib `gpu-lease-blueprint-lib/` | **DONE** — allocator, quote policy, EIP-191 credentials, 4 jobs | `cargo test -p gpu-lease-blueprint-lib` → 28/28 |
 | Rust bin `gpu-lease-blueprint-bin/` | **COMPILES** — runner + periodic reaper sweep wired | `cargo check --workspace` clean |
+| **Operator HTTP API** | **DONE** — capabilities (live idle counts), signed-math quotes w/ intentHash, public lease status, EIP-191 challenge/session endpoints; bin serves it (`OPERATOR_API_PORT`) | 6 API tests + live E2E leg |
 | **Canonical metadata gen** | **DONE** — `cargo run -p gpu-lease-blueprint-gen` derives `metadata/blueprint.json` from the live `sol!` types (EIP-712 encode-type — drift impossible); staleness test in `cargo test` | gen crate, 2 tests |
 | **Driver round-trip on live chain** | **DONE** — our definition registered with data-URI + keccak pin, read back via existing 0.19 views, pin + payload verified | `run-e2e.sh` output: `driver round-trip ok` |
 | **tnt-core E2E on local anvil** | **DONE — full money+job lifecycle**: vault deployed from forge artifacts on the seeded chain; escrow → LEASE → EXTEND → exact-refund RELEASE → withdraw → permissionless REAP; I1 asserted on-chain after every step; ONE leaseId across money and routing | `./scripts/run-e2e.sh` → green (~3s) |

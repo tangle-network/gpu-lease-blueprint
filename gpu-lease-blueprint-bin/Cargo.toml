@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 gpu-lease-blueprint-lib = { path = "../gpu-lease-blueprint-lib" }
+axum = "0.8"
 blueprint-sdk = { version = "=0.2.0-alpha.12", default-features = false, features = ["std", "tangle"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

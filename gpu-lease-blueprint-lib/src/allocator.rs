@@ -179,6 +179,16 @@ impl GpuAllocator {
             .cloned()
     }
 
+    /// The operator's advertised inventory (public data — SPEC §4:
+    /// operator-local truth, never an on-chain registry).
+    pub fn inventory(&self) -> Vec<GpuDevice> {
+        self.state
+            .lock()
+            .expect("allocator poisoned")
+            .devices
+            .clone()
+    }
+
     pub fn idle_count(&self, gpu_class: &str, tee_required: bool) -> usize {
         let st = self.state.lock().expect("allocator poisoned");
         st.devices
