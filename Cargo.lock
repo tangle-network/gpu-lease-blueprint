@@ -4138,6 +4138,8 @@ dependencies = [
 name = "gpu-lease-blueprint-lib"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "blueprint-anvil-testing-utils",
  "blueprint-sdk",
  "hex",
  "k256",
@@ -4148,6 +4150,7 @@ dependencies = [
  "tiny-keccak",
  "tokio",
  "tracing",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]

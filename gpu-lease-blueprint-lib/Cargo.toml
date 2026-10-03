@@ -19,4 +19,7 @@ tokio = { version = "1", default-features = false, features = ["sync", "rt"] }
 tracing = "0.1"
 
 [dev-dependencies]
+anyhow = "1"
+blueprint-anvil-testing-utils = { version = "=0.2.0-alpha.12" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

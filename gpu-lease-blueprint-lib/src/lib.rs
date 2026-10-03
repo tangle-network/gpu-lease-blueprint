@@ -44,6 +44,8 @@ sol! {
         uint8 confidentiality;
         string gpuClass;
         string region;
+        /// SPEC §1: the RFQ quote binds the requester — mirrored on-chain here.
+        address lessee;
     }
 
     /// LEASE job output — PUBLIC DATA ONLY (SPEC §2 Credentials).

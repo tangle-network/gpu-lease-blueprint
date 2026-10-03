@@ -32,6 +32,8 @@ pub enum LeaseError {
     IntentHashMismatch { actual: String, expected: String },
     #[error("unsupported intent version {0} (fail closed, SPEC §3)")]
     UnknownIntentVersion(u8),
+    #[error("requester mismatch: job submitter {caller} is not the lessee the quote bound {lessee}")]
+    RequesterMismatch { caller: String, lessee: String },
     #[error(transparent)]
     Allocator(#[from] AllocatorError),
     #[error(transparent)]
@@ -63,16 +65,22 @@ pub fn allocate(request: &GpuLeaseRequest, caller: &str) -> Result<GpuLeaseOutpu
     let policy = crate::QuotePolicy::from_env();
     policy.validate_redeemed_price(&request.gpuClass, request.pricePerSecond)?;
 
+    // The lessee the quote bound must be the job submitter (SPEC §1 requester binding).
+    let lessee = format!("{:#x}", request.lessee);
+    if lessee != caller {
+        return Err(LeaseError::RequesterMismatch { caller: caller.to_string(), lessee });
+    }
+
     // Deterministic leaseId: binds intent + lessee + operator monotonic nonce.
     static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = NONCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let lease_id = crate::allocator::derive_lease_id(actual, caller, nonce);
+    let lease_id = crate::allocator::derive_lease_id(actual, &lessee, nonce);
 
     let alloc = crate::allocator().acquire(
         &request.gpuClass,
         request.confidentiality > 0,
         lease_id,
-        caller,
+        &lessee,
         request.durationSeconds,
     )?;
 
@@ -143,6 +151,7 @@ mod tests {
             confidentiality: 0,
             gpuClass: class,
             region,
+            lessee: "0x0000000000000000000000000000000000000042".parse().unwrap(),
         }
     }
 
@@ -174,6 +183,7 @@ mod tests {
             alloc_core(&a, &r, "0xabc"),
             Err(LeaseError::IntentHashMismatch { .. })
         ));
+        let _ = &mut r;
     }
 
     #[test]

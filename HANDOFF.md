@@ -1,64 +1,61 @@
 # GPU Lease Blueprint — Session Handoff
 
 **Repo:** https://github.com/tangle-network/gpu-lease-blueprint
-**Date:** 2026-10-03 (updated after the completion session)
+**Date:** 2026-10-03 (updated after the tnt-core + E2E session)
 **Spec:** `SPEC.md` in the repo root — read it first; it is frozen design law.
 
-## Where we are — UPDATED: the two "next steps" from the last handoff are DONE
+## Where we are — UPDATED: tnt-core integration + local E2E are DONE
 
-The last handoff said the contract wasn't done until its tests said so. They now say so:
+Everything from the prior handoffs stands (contract I1–I5 35/35, Rust lib 28/28).
+New this session:
 
-1. **Contract + invariant suite: DONE.** `_settle()` placeholder is gone — real exact
-   pro-rata (`refund = price * remaining`, exact because `escrow == price * paidSeconds`
-   by construction; derivation pinned by fuzz). 35/35 Foundry tests green at 1000 fuzz
-   runs: I1 conservation after every step (vault-empty terminal states), I2 overstay
-   impossibility mid-flight, I3 exact refunds, I4 single settlement (all four orderings),
-   I5 record immutability. Also fixed en route: `foundry.toml` `libs` string→array (was
-   broken from the first commit), uint64/uint128 overflows now fail closed with
-   `Overflow()` instead of `Panic(0x11)`, overpay refunded at call boundaries so I1
-   holds exactly, double `LeaseReleased` emit removed.
-2. **The Rust blueprint EXISTS now.** Full workspace mirroring
-   `ai-agent-sandbox-blueprint`'s proven structure (same SDK pin, `[patch.crates-io]` →
-   tangle-network/blueprint rev `5405c01`):
-   - `gpu-lease-blueprint-lib/` — 28/28 tests: co-located **allocator** (class/TEE-
-     exclusive binding, reap sweep), **quote policy** (per-class base, class bps, TEE
-     premium, piecewise utilization curve, fail-closed redeemed-price ceiling),
-     **EIP-191 challenge-session credentials** (single-use challenges, signer recovery,
-     scoped expiring tokens, lease-bound revocation), and the four SPEC §1 jobs
-     (LEASE=0/RELEASE=1/EXTEND=2/REAP=3) as extractor-style handlers with public-data-only
-     outputs + `router()`.
-   - `gpu-lease-blueprint-bin/` — `BlueprintRunner` wiring + 30s reaper sweep
-     (frees devices/revokes credentials at escrow exhaustion — the operator side of I2).
-     Compiles clean; NOT yet run against a live chain.
-3. `script/DeployGpuLeaseVault.s.sol` — vault deploy script (anvil default key).
+1. **Proper tnt-core integration (soldeer tnt-core 0.19.0, sibling layout):**
+   - `contracts/src/GpuLeaseBlueprint.sol` — the BSM: `onJobCall` caches inputs
+     (0.19 passes only inputsHash at result time); `onJobResult(LEASE)` binds
+     leaseId→operator ONLY after cross-checking the REAL vault lease (exists,
+     Live, intentHash match, operator match, lessee match, price match).
+     Nonexistent leases read as empty state-0 structs — caught via expiry==0.
+   - `contracts/script/RegisterGpuLeaseBlueprint.s.sol` — deploys vault + BSM,
+     `createBlueprint` with 4 job definitions (LEASE=0/RELEASE=1/EXTEND=2/REAP=3,
+     order pinned to the Rust router).
+   - 11 tnt-core integration tests (foundry): routing, all fail-closed paths,
+     vault-money+BSM-routing full lifecycle. **forge test: 46/46.**
+2. **E2E on local tnt-core (the real proof):**
+   `gpu-lease-blueprint-lib/tests/anvil.rs` — `BlueprintHarness` boots an anvil
+   container seeded from the bundled LocalTestnet broadcast (full Tangle stack),
+   runs the REAL BlueprintRunner with our router, and submits jobs ON-CHAIN:
+   LEASE → GpuLeaseOutput{leaseId, endpoint v1, schemaVersion=1} → EXTEND →
+   RELEASE. **`./scripts/run-e2e.sh` → green in ~2s.** Skips gracefully without
+   Docker so `cargo test --workspace` stays green anywhere.
 
 ## Continuation point (in order)
 
-1. **tnt-core registration**: write `RegisterBlueprint` for the 4 jobs (import tnt-core
-   `Types.sol`, mirror `ai-agent-sandbox-blueprint/contracts/script/RegisterBlueprint.s.sol`).
-   Job IDs are pinned in `gpu-lease-blueprint-lib/src/lib.rs` (0–3, sequential).
-2. **Live smoke test**: anvil chain + `blueprint-anvil-testing-utils` (sibling has the
-   harness) — LEASE→EXTEND→RELEASE happy path end-to-end, verify vault accounting on the
-   result path. This is where bin bugs (if any) surface.
-3. **SDK `gpuLease` resolver** (sandbox-sdk repo, SPEC §5): create sandbox → collect N
-   quotes → validate (#1568 client) → LEASE → attach via endpoint v1 → teardown w/ refund.
-4. **Audit** before mainnet money (SPEC §6.4 — non-negotiable).
+1. **Register against a persistent LocalTestnet anvil** (not the ephemeral
+   harness): `forge script contracts/script/RegisterGpuLeaseBlueprint.s.sol
+   --rpc-url $RPC --broadcast` + run the bin against it, mirroring the sibling's
+   `deploy-local.sh` flow. This proves the register script + bin end-to-end.
+2. **SDK `gpuLease` resolver** (sandbox-sdk repo, SPEC §5).
+3. **Audit** before mainnet money (SPEC §6.4 — non-negotiable).
 
 ## Known-not-done (do NOT claim otherwise)
 
-- Bin has never connected to a chain — registration + smoke test are the proof it needs.
-- No `RegisterBlueprint` yet — nothing is registered anywhere.
-- The allocator is in-memory per-process (fine for v1 single-operator; multi-process
-  needs the local-database store, `blueprint-store-local-database` is in the patch set).
-- Reap-sweep interval (30s) is hardcoded in `bin/src/main.rs` — env-ify when it matters.
+- The register SCRIPT is written+compiling but has not been broadcast against a
+  live chain (the E2E used the harness's own registration path).
+- The bin has not been run as a standalone process against a chain.
+- Multi-operator E2E (harness supports `operator_specs`) — v1 proof is single-op.
+- SDK resolver + audit remain.
 
-## Environment notes (carried forward)
+## Environment notes (all proven this session)
 
-- `forge install foundry-rs/forge-std --no-commit` after fresh clone (`dependencies/` is
-  gitignored; forge-std v1.17.0 pinned by the install).
-- Rust toolchain: 1.91 (`rust-toolchain.toml`), same as the sibling repo.
-- The SDK graph patch section must stay in sync with
-  `ai-agent-sandbox-blueprint/Cargo.toml` — it's the proven-resolution pin.
-- Foundry config: `libs = ["dependencies"]` (ARRAY — the string form breaks forge 1.8).
-- vm.expectRevert gotcha that cost time: an unfunded caller's `{value:...}` call fails
-  the EVM-level balance check → empty revert data, NOT the contract's custom error.
+- **E2E needs Docker**: `./scripts/run-e2e.sh` encodes the two macOS+colima traps:
+  `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock` (bollard default socket
+  doesn't exist) and `TMPDIR` under `/Users` (colima only shares /Users into the
+  VM; /tmp bind-mounts fail with "bind source path does not exist").
+- Foundry deps via soldeer: `forge soldeer install` (tnt-core 0.19.0, forge-std
+  1.9.6). remappings.txt is committed — has /src suffixes (soldeer's generated
+  ones lacked them).
+- `libs = ["dependencies"]` (ARRAY — string form breaks forge 1.8).
+- forge 1.8 gotcha: `vm.expectRevert(SomeError.selector)` FAILS on errors with
+  args — use `vm.expectPartialRevert`.
+- prank gotcha: reading `bsm.JOB_X()` inside a pranked call's arg list CONSUMES
+  the prank (it's itself a call) — hoist job-id reads to setUp.

@@ -2,3 +2,4 @@ out/
 cache/
 target/
 dependencies/
+.tmp-e2e/
