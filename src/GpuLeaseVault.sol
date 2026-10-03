@@ -9,27 +9,30 @@ pragma solidity ^0.8.26;
 ///         are off-chain data (see SPEC.md) and must NEVER migrate on-chain.
 ///
 /// @dev INVARIANTS (the contract is correct iff these hold forever):
-///  I1 Escrow conservation: operatorEarnings + totalRefunds + escrowOf(lease)
-///     for all live leases == total escrowed, at every block boundary.
-///  I2 Overstay impossibility: a lease's consumer can never consume GPU time
-///     beyond escrow/pricePerSecond; REAP enforces settlement at expiry.
-///  I3 Refund atomicity: RELEASE refunds exactly (escrow - elapsed*price),
-///     atomically with state transition; no partial states are observable.
-///  I4 Single settlement: each lease settles exactly once (RELEASE xor REAP).
-///  I5 Quote binding: intentHash + operator + lessee in the lease record are
-///     immutable after creation; they match the RFQ quote redeemed on-chain.
+///  I1 Escrow conservation: address(this).balance == totalEscrowed + operatorEarnings
+///     at every observable point (excess value is refunded at call boundaries).
+///  I2 Overstay impossibility: for every live lease,
+///     pricePerSecond * remainingSeconds(lease) <= escrow(lease).
+///     GPU access beyond escrow is structurally unpayable.
+///  I3 Refund atomicity: RELEASE refunds exactly pricePerSecond * remainingSeconds
+///     (== escrow * remaining / paidSeconds, exact — see _settle), atomically with
+///     the state transition; no partial state is observable.
+///  I4 Single settlement: each lease settles exactly once (RELEASE xor REAP);
+///     the second settlement attempt reverts NotLive.
+///  I5 Quote binding: operator, lessee, intentHash, pricePerSecond in the lease
+///     record are written exactly once (at create) and never mutated again.
 contract GpuLeaseVault {
     /// @notice A lease. `endpointInfo` carries ONLY public data (schema-versioned);
     ///         credentials NEVER touch this contract or any event/log (SPEC §2).
     struct Lease {
-        address operator;      // I5: immutable
-        address lessee;        // I5: immutable
-        uint128 escrow;        // remaining prepaid escrow (wei)
-        uint128 pricePerSecond;// wei/sec, from the redeemed quote (I5 intent)
-        uint64  expiry;        // unix second when escrow is exhausted
-        bytes32 intentHash;    // keccak256 of versioned intent (class,duration,...)
-        uint8   confidentiality;// mirrors the quote's TEE binding
-        uint8   state;         // 0=Live 1=Released 2=Reaped
+        address operator;       // I5: immutable after create
+        address lessee;         // I5: immutable after create
+        uint128 escrow;         // remaining prepaid escrow (wei) == price * paidSeconds
+        uint128 pricePerSecond; // wei/sec, from the redeemed quote (I5: immutable)
+        uint64  expiry;         // unix second when paid time ends
+        bytes32 intentHash;     // keccak256 of versioned intent (I5: immutable)
+        uint8   confidentiality;// mirrors the quote's TEE binding (I5: immutable)
+        uint8   state;          // 0=Live 1=Released 2=Reaped
     }
 
     /// @notice Lease lifecycle events. No secrets, ever.
@@ -40,8 +43,11 @@ contract GpuLeaseVault {
     event OperatorSlashed(address indexed operator, bytes32 indexed leaseId, uint256 amount);
 
     uint16 public constant SCHEMA_VERSION = 1;
+
+    /// @dev Total wei currently escrowed for LIVE leases (I1).
     uint256 public totalEscrowed;
-    uint256 public operatorEarnings; // withdrawable by operators (I1)
+    /// @dev Total withdrawable operator earnings, settled and unwithdrawn (I1).
+    uint256 public operatorEarnings;
 
     mapping(bytes32 => Lease) public leases;
     mapping(address => uint256) public operatorEarningsOf;
@@ -52,10 +58,12 @@ contract GpuLeaseVault {
     error InsufficientEscrow();
     error DurationZero();
     error Overflow();
+    error NothingToWithdraw();
 
     /// @notice Create a lease. Called by the tnt-core job layer (LEASE) or directly
     ///         by the buyer for a self-managed flow. Escrow = price * duration,
-    ///         computed off-chain and re-verified here (fail-closed).
+    ///         re-verified here (fail-closed). Excess msg.value is refunded so that
+    ///         I1 holds exactly (no stranded dust in the vault).
     function create(
         address operator,
         uint128 pricePerSecond,
@@ -68,28 +76,35 @@ contract GpuLeaseVault {
         if (durationSeconds == 0) revert DurationZero();
         uint256 cost = uint256(pricePerSecond) * uint256(durationSeconds);
         if (msg.value < cost) revert InsufficientEscrow();
-        uint128 escrow = uint128(cost); // exact escrow; excess value is rejected by callers
-        uint64 expiry = uint64(block.timestamp) + durationSeconds;
-        if (expiry < block.timestamp) revert Overflow();
-        leaseId = keccak256(abi.encodePacked(operator, msg.sender, intentHash, block.timestamp, totalEscrowed));
-        leases[leaseId] = Lease(operator, msg.sender, escrow, pricePerSecond, expiry, intentHash, confidentiality, 0);
+        if (cost > type(uint128).max) revert Overflow();
+        uint256 expiry256 = uint256(block.timestamp) + uint256(durationSeconds);
+        if (expiry256 > type(uint64).max) revert Overflow();
+        uint64 expiry = uint64(expiry256);
+        leaseId = keccak256(abi.encodePacked(operator, msg.sender, intentHash, block.timestamp, totalEscrowed, msg.value));
+        leases[leaseId] = Lease(operator, msg.sender, uint128(cost), pricePerSecond, expiry, intentHash, confidentiality, 0);
         totalEscrowed += cost;
-        emit LeaseCreated(leaseId, operator, msg.sender, escrow, pricePerSecond, expiry, intentHash, confidentiality, endpointInfo, SCHEMA_VERSION);
+        if (msg.value > cost) _refund(msg.sender, msg.value - cost);
+        emit LeaseCreated(leaseId, operator, msg.sender, uint128(cost), pricePerSecond, expiry, intentHash, confidentiality, endpointInfo, SCHEMA_VERSION);
     }
 
-    /// @notice Extend a live lease by paying for more seconds. Enforces I2.
+    /// @notice Extend a live lease by paying for more seconds. Enforces I2:
+    ///         after the call, price * remaining == escrow again. The lessee
+    ///         (or anyone subsidizing) may pay; only the lease's money changes.
     function extend(bytes32 leaseId, uint64 addSeconds) external payable {
         Lease storage l = leases[leaseId];
         if (l.state != 0) revert NotLive();
         if (addSeconds == 0) revert DurationZero();
         uint256 cost = uint256(l.pricePerSecond) * uint256(addSeconds);
         if (msg.value < cost) revert InsufficientEscrow();
-        uint64 newExpiry = l.expiry + addSeconds;
-        if (newExpiry < l.expiry) revert Overflow();
-        // Escrow tops up past the old expiry; remaining old escrow carries over (I3).
-        l.escrow += uint128(cost);
+        uint256 newEscrow = uint256(l.escrow) + cost;
+        if (newEscrow > type(uint128).max) revert Overflow();
+        uint256 newExpiry256 = uint256(l.expiry) + uint256(addSeconds);
+        if (newExpiry256 > type(uint64).max) revert Overflow();
+        uint64 newExpiry = uint64(newExpiry256);
+        l.escrow = uint128(newEscrow);
         l.expiry = newExpiry;
         totalEscrowed += cost;
+        if (msg.value > cost) _refund(msg.sender, msg.value - cost);
         emit LeaseExtended(leaseId, uint128(cost), newExpiry);
     }
 
@@ -99,14 +114,14 @@ contract GpuLeaseVault {
         Lease storage l = leases[leaseId];
         if (msg.sender != l.lessee) revert NotLessee();
         if (l.state != 0) revert NotLive();
-        (uint128 refund, uint128 take) = _settle(l, leaseId);
-        payable(l.lessee).transfer(refund);
+        (uint128 refund, uint128 take) = _settle(l);
         emit LeaseReleased(leaseId, refund, take);
+        _refund(l.lessee, refund);
     }
 
-    /// @notice Permissionless reap after expiry: full escrow to the operator.
-    ///         Overstay is impossible — GPU access is credential-scoped off-chain
-    ///         and the operator revokes credentials at expiry (SPEC §2).
+    /// @notice Permissionless reap after expiry: full remaining escrow to the
+    ///         operator. Overstay is impossible — GPU access is credential-scoped
+    ///         off-chain and the operator revokes credentials at expiry (SPEC §2).
     function reap(bytes32 leaseId) external {
         Lease storage l = leases[leaseId];
         if (l.state != 0) revert NotLive();
@@ -114,42 +129,57 @@ contract GpuLeaseVault {
         uint128 take = l.escrow;
         l.escrow = 0;
         l.state = 2;
+        totalEscrowed -= take;
         operatorEarningsOf[l.operator] += take;
+        operatorEarnings += take;
         emit LeaseReaped(leaseId, take, msg.sender);
     }
 
     /// @notice Slashing hook for tnt-core governance/operator-staking integration.
-    ///         Marks the lease settled and records an operator penalty event.
+    ///         Callable only on settled (Released/Reaped) leases — the RELEASE-
+    ///         attested violation path (SPEC §1). Money movement is delegated to
+    ///         the staking system; this records the penalty event.
     function slash(bytes32 leaseId, uint256 amount) external {
         Lease storage l = leases[leaseId];
         if (l.state == 0) revert NotLive();
         emit OperatorSlashed(l.operator, leaseId, amount);
     }
 
-    /// @dev Shared settlement: elapsed = min(now, expiry) - start, pro-rata.
-    function _settle(Lease storage l, bytes32 leaseId) internal returns (uint128 refund, uint128 take) {
-        uint256 elapsed = l.expiry - block.timestamp; // remaining
-        take = l.escrow; // release before expiry: refund the *remaining time* share
-        // Pro-rata by remaining seconds of paid time:
-        // refund = escrow * remaining / totalPaidSeconds. totalPaidSeconds is
-        // recoverable as escrow/pricePerSecond + elapsed at settle time; to keep
-        // the storage minimal we refund against remaining-time value exactly:
-        uint256 totalSeconds = (uint256(l.escrow) / l.pricePerSecond) + 0; // conservative
-        refund = uint128(uint256(l.escrow) - uint256(l.pricePerSecond) * 0); // placeholder: see tests
-        // NOTE: exact pro-rata math is exercised and pinned in the test suite;
-        // this body is intentionally minimal for the frozen-core review pass.
-        l.escrow = 0;
-        l.state = 1;
-        operatorEarningsOf[l.operator] += take - refund;
-        totalEscrowed -= take;
-        emit LeaseReleased(leaseId, refund, take);
-    }
-
     /// @notice Operators withdraw settled earnings.
     function withdrawEarnings() external {
         uint256 amount = operatorEarningsOf[msg.sender];
+        if (amount == 0) revert NothingToWithdraw();
         operatorEarningsOf[msg.sender] = 0;
         operatorEarnings -= amount;
-        payable(msg.sender).transfer(amount);
+        _refund(msg.sender, amount);
+    }
+
+    /// @dev EXACT pro-rata settlement math (I3). State transitions happen here;
+    ///       events and transfers happen at the call site (checks-effects-interactions).
+    ///
+    ///      paidSeconds is DERIVED, not stored: escrow == pricePerSecond * paidSeconds
+    ///      holds at every mutation site (create and extend are the only writers of
+    ///      escrow, and both add exactly price * seconds), so the division below has
+    ///      zero remainder by construction. The test suite pins this derivation.
+    ///
+    ///      refund = price * remaining              (== escrow * remaining / paidSeconds, exact)
+    ///      take   = escrow - refund                (elapsed-time payment)
+    ///      refund + take == escrow                 (I1 conservation at settle)
+    function _settle(Lease storage l) internal returns (uint128 refund, uint128 take) {
+        uint256 remaining = l.expiry > block.timestamp ? uint256(l.expiry - block.timestamp) : 0;
+        refund = uint128(uint256(l.pricePerSecond) * remaining); // <= escrow, cannot overflow uint128
+        uint128 escrowBefore = l.escrow;
+        take = escrowBefore - refund;
+        l.escrow = 0;
+        l.state = 1;
+        totalEscrowed -= escrowBefore;
+        operatorEarningsOf[l.operator] += take;
+        operatorEarnings += take;
+    }
+
+    /// @dev Refund helper (pull-free, reentrancy-safe after effects).
+    function _refund(address to, uint256 amount) internal {
+        (bool ok, ) = payable(to).call{value: amount}("");
+        require(ok, "ETH_TRANSFER_FAILED");
     }
 }
