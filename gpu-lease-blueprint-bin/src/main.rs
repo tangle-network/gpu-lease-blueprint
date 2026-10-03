@@ -45,8 +45,13 @@ async fn main() -> Result<(), blueprint_sdk::Error> {
     let tangle_producer = TangleProducer::new(tangle_client.clone(), service_id);
 
     // Periodic sweep: free devices + revoke credentials at escrow exhaustion.
-    tokio::spawn(async {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    // Interval is operator policy (SPEC §2) — default 30s, tighter for local dev.
+    let sweep_secs: u64 = std::env::var("REAPER_SWEEP_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
         loop {
             interval.tick().await;
             let freed = gpu_lease_blueprint_lib::allocator().reap_expired();
