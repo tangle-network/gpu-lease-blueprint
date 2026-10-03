@@ -109,6 +109,36 @@ fn docker_socket_available() -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Tangle view ABI (tnt-core 0.19 ITangleBlueprints) — the driver spike:
+// everything the TangleDriver needs is READABLE VIEW STATE. Zero protocol
+// changes required: definition, metadata, URI + pinned hash all come back
+// from existing getters.
+// ─────────────────────────────────────────────────────────────────────────────
+
+sol! {
+    struct TangleBlueprintMetadata {
+        string name;
+        string description;
+        string author;
+        string category;
+        string codeRepository;
+        string logo;
+        string website;
+        string license;
+        string profilingData;
+    }
+
+    #[sol(rpc)]
+    interface ITangleViews {
+        function blueprintCount() external view returns (uint64);
+        function blueprintMetadata(uint64 blueprintId)
+            external
+            view
+            returns (TangleBlueprintMetadata metadata, string metadataUri, bytes32 metadataHash);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Vault ABI (mirror of contracts/src/GpuLeaseVault.sol)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -318,6 +348,20 @@ async fn gpu_lease_full_lifecycle_end_to_end() -> Result<()> {
         };
 
         let chain = Chain::new(&harness).await;
+
+        // ── 0. Driver spike: read blueprint state back from the live chain ──
+        let tangle_addr = harness.deployment().tangle_contract;
+        {
+            let provider = chain.provider().await?;
+            let views = ITangleViews::new(tangle_addr, &provider);
+            let count: u64 = views.blueprintCount().call().await?;
+            anyhow::ensure!(count >= 1, "expected at least one registered blueprint");
+            let meta = views.blueprintMetadata(0).call().await?;
+            eprintln!(
+                "driver spike: blueprintCount={count} name={:?} category={:?} metadataUri={:?} hash={:#x}",
+                meta.metadata.name, meta.metadata.category, meta.metadataUri, meta.metadataHash
+            );
+        }
 
         // ── Cast: buyer, operator-money-sink, reaper, deployer ────────────
         let buyer = harness.caller_account();
