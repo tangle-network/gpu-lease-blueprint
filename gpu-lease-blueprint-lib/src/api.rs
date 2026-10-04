@@ -206,6 +206,18 @@ fn parse_lease_id(hex_str: &str) -> Result<[u8; 32], (StatusCode, AxumJson<ApiEr
         .map_err(|_| err(StatusCode::BAD_REQUEST, "leaseId must be 32 bytes"))
 }
 
+/// Browser clients hit operator APIs cross-origin by design (the sandbox web
+/// app is a first-class consumer). Allowed origins default to any — quotes
+/// and capabilities are public data; state-changing surfaces are not served
+/// here (jobs go through tnt-core; credentials are session-scoped).
+fn cors_layer() -> tower_http::cors::CorsLayer {
+    use tower_http::cors::Any;
+    tower_http::cors::CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any)
+}
+
 /// Build the operator API router over injectable state.
 pub fn operator_api_router_with(state: ApiState) -> axum::Router {
     axum::Router::new()
@@ -214,6 +226,7 @@ pub fn operator_api_router_with(state: ApiState) -> axum::Router {
         .route("/api/leases/{leaseId}", get(lease_status))
         .route("/api/session/challenge", post(session_challenge))
         .route("/api/session/verify", post(session_verify))
+        .layer(cors_layer())
         .with_state(state)
 }
 

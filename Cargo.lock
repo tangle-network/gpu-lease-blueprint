@@ -4168,6 +4168,7 @@ dependencies = [
  "tiny-keccak",
  "tokio",
  "tower",
+ "tower-http",
  "tracing",
  "tracing-subscriber 0.3.23",
 ]
