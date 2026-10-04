@@ -47,17 +47,27 @@ pub struct Challenge {
     pub lessee: String,
     pub nonce: [u8; 32],
     pub expires_at: u64,
+    /// TEE attestation nonce — when the lease requires confidentiality, the
+    /// GPU's TEE must sign this nonce to prove it's the attested device.
+    /// Zero = no TEE attestation required (non-confidential lease).
+    pub tee_nonce: [u8; 32],
 }
 
 impl Challenge {
     /// The exact string the lessee must EIP-191 `personal_sign`.
     pub fn message(&self) -> String {
-        format!(
+        let mut msg = format!(
             "gpu-lease session\nlease: 0x{}\nnonce: 0x{}\nexpires: {}",
             hex::encode(self.lease_id),
             hex::encode(self.nonce),
             self.expires_at
-        )
+        );
+        // TEE composition: the challenge binds the GPU's TEE attestation
+        // nonce, so the credential is only valid on the attested device.
+        if self.tee_nonce != [0u8; 32] {
+            msg.push_str(&format!("\ntee-nonce: 0x{}", hex::encode(self.tee_nonce)));
+        }
+        msg
     }
 }
 
@@ -123,6 +133,18 @@ impl CredentialSessions {
     /// Issue a nonce challenge bound to (leaseId, lessee). Deterministic
     /// nonce derivation per (lease, counter) — no RNG dependency.
     pub fn issue_challenge(&self, lease_id: [u8; 32], lessee: &str) -> Challenge {
+        self.issue_challenge_with_tee(lease_id, lessee, false)
+    }
+
+    /// Issue a challenge with a TEE attestation nonce for confidential leases.
+    /// The GPU's TEE must sign this nonce to prove it's the attested device
+    /// (NVIDIA CC mode: the GPU signs with its unique device key).
+    pub fn issue_challenge_with_tee(
+        &self,
+        lease_id: [u8; 32],
+        lessee: &str,
+        tee_required: bool,
+    ) -> Challenge {
         let n = self.counter.fetch_add(1, Ordering::SeqCst);
         let mut nonce = [0u8; 32];
         let mut k = Keccak::v256();
@@ -130,10 +152,18 @@ impl CredentialSessions {
         k.update(lessee.as_bytes());
         k.update(&n.to_be_bytes());
         k.finalize(&mut nonce);
+        let mut tee_nonce = [0u8; 32];
+        if tee_required {
+            let mut tk = Keccak::v256();
+            tk.update(&nonce);
+            tk.update(b"gpu-tee-attestation");
+            tk.finalize(&mut tee_nonce);
+        }
         let challenge = Challenge {
             lease_id,
             lessee: lessee.to_string(),
             nonce,
+            tee_nonce,
             expires_at: unix_now() + CHALLENGE_TTL_SECONDS,
         };
         self.state
@@ -452,5 +482,44 @@ mod tests {
             eip191_recover_signer("msg", &hex::encode([0u8; 64])),
             Err(CredentialError::RecoveryFailed)
         ));
+    }
+}
+
+#[cfg(test)]
+mod tee_attestation_tests {
+    use super::*;
+
+    #[test]
+    fn tee_challenge_includes_attestation_nonce() {
+        let sessions = CredentialSessions::new();
+        let ch = sessions.issue_challenge_with_tee([9u8; 32], "0xabc", true);
+        assert_ne!(ch.tee_nonce, [0u8; 32], "TEE nonce must be generated");
+        assert!(
+            ch.message().contains("tee-nonce:"),
+            "challenge message must bind the TEE nonce: {}",
+            ch.message()
+        );
+    }
+
+    #[test]
+    fn non_tee_challenge_has_zero_tee_nonce() {
+        let sessions = CredentialSessions::new();
+        let ch = sessions.issue_challenge([9u8; 32], "0xabc");
+        assert_eq!(ch.tee_nonce, [0u8; 32]);
+        assert!(!ch.message().contains("tee-nonce:"));
+    }
+
+    #[test]
+    fn tee_challenge_is_deterministic_per_nonce() {
+        let sessions = CredentialSessions::new();
+        // Same challenge always produces the same tee_nonce (derived from the
+        // session nonce — the GPU's TEE signs THIS exact nonce).
+        let ch = sessions.issue_challenge_with_tee([9u8; 32], "0xabc", true);
+        let mut expected = [0u8; 32];
+        let mut k = Keccak::v256();
+        k.update(&ch.nonce);
+        k.update(b"gpu-tee-attestation");
+        k.finalize(&mut expected);
+        assert_eq!(ch.tee_nonce, expected);
     }
 }
