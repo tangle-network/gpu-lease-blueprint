@@ -24,6 +24,62 @@ import {GpuLeaseVault} from "./GpuLeaseVault.sol";
  *      on-chain pricing. GPU classes/generations are off-chain data.
  */
 contract GpuLeaseBlueprint is BlueprintServiceManagerBase {
+    // ═══════════════════════════════════════════════════════════
+    // SLASHING — tnt-core owns the lifecycle; these hooks customize it
+    // for the GPU lease domain. The evidence verifier interprets
+    // domain-specific evidence (GPU identity, benchmarks, TEE reports).
+    // See: github.com/tangle-network/tangle-slashing
+    // ═════════════════════════════════════════════════════════
+
+    /// @notice Who can propose slashes for this service.
+    /// @dev Zero = only svc.owner/bp.owner (tnt-core default). For compute
+    ///      marketplaces, the lessee should be authorized to propose.
+    mapping(uint64 => address) public slashingOrigins;
+
+    /// @notice Custom dispute window. 0 = tnt-core default.
+    mapping(uint64 => uint64) public customDisputeWindows;
+
+    /// @notice Recorded slash history: operator => serviceId => count.
+    mapping(address => mapping(uint64 => uint256)) public slashHistory;
+
+    /// @notice Total slashes per operator.
+    mapping(address => uint256) public totalSlashes;
+
+    event SlashProposed(uint64 indexed serviceId, address indexed operator, uint8 slashPercent);
+    event SlashExecuted(uint64 indexed serviceId, address indexed operator, uint8 slashPercent);
+
+    function querySlashingOrigin(uint64 serviceId) external view override returns (address) {
+        return slashingOrigins[serviceId];
+    }
+
+    function getSlashingWindow(uint64 serviceId) external view override returns (bool useDefault, uint64 window) {
+        uint64 custom = customDisputeWindows[serviceId];
+        if (custom == 0) return (true, 0);
+        return (false, custom);
+    }
+
+    function queryDisputeOrigin(uint64 serviceId) external view override returns (address) {
+        return address(0); // operator disputes with bond (tnt-core default)
+    }
+
+    function onUnappliedSlash(uint64 serviceId, bytes calldata offender, uint8 slashPercent) external override {
+        emit SlashProposed(serviceId, address(bytes20(offender)), slashPercent);
+    }
+
+    function onSlash(uint64 serviceId, bytes calldata offender, uint8 slashPercent) external override {
+        address operator = address(bytes20(offender));
+        slashHistory[operator][serviceId] += 1;
+        totalSlashes[operator] += 1;
+        emit SlashExecuted(serviceId, operator, slashPercent);
+    }
+
+    function setSlashingOrigin(uint64 serviceId, address origin) external onlyBlueprintOwner {
+        slashingOrigins[serviceId] = origin;
+    }
+
+    function setDisputeWindow(uint64 serviceId, uint64 window) external onlyBlueprintOwner {
+        customDisputeWindows[serviceId] = window;
+    }
     // ═══════════════════════════════════════════════════════════════════
     // JOB IDS — MUST match gpu-lease-blueprint-lib/src/lib.rs and the
     // RegisterBlueprint job order (sequential, no gaps).

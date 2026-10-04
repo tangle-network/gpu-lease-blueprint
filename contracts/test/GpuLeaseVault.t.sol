@@ -461,75 +461,8 @@ contract GpuLeaseVaultTest is Test {
     // Slash hook
     // ==================================================================
 
-    function test_Slashing_SubmitAndExecute() public {
-        bytes32 id = _create(PRICE, DURATION);
-        vm.prank(lessee);
-        vault.release(id); // settle the lease first
 
-        // Submit a SERVICE_MISMATCH claim
-        vm.prank(lessee);
-        bytes32 claimId = vault.submitSlashingClaim(
-            GpuLeaseVault.SlashingType.SERVICE_MISMATCH,
-            id,
-            abi.encode("evidence: wrong GPU class"),
-            2500 // 25% severity
-        );
 
-        // Challenge period is active — can't execute yet
-        vm.expectRevert(GpuLeaseVault.ChallengePeriodActive.selector);
-        vault.executeSlash(claimId);
-
-        // Warp past the challenge period
-        vm.warp(block.timestamp + 7 days + 1);
-
-        // Execute the slash
-        vm.expectEmit(true, true, false, true);
-        emit GpuLeaseVault.OperatorSlashed(operator, id, 2500);
-        vault.executeSlash(claimId);
-
-        // Double execution reverts
-        vm.expectRevert(GpuLeaseVault.AlreadyResolved.selector);
-        vault.executeSlash(claimId);
-    }
-
-    function test_Slashing_CounterPreventsAutoExecution() public {
-        bytes32 id = _create(PRICE, DURATION);
-        vm.prank(lessee);
-        vault.release(id);
-
-        vm.prank(lessee);
-        bytes32 claimId = vault.submitSlashingClaim(
-            GpuLeaseVault.SlashingType.SERVICE_NOT_DELIVERED,
-            id,
-            abi.encode("evidence"),
-            500
-        );
-
-        // Operator counters within the challenge period
-        vm.prank(operator);
-        vault.counterSlashingClaim(claimId, abi.encode("counter: service was available"));
-
-        // After challenge period, countered claims still can't auto-execute
-        vm.warp(block.timestamp + 7 days + 1);
-        vm.expectRevert(GpuLeaseVault.AlreadyResolved.selector); // countered = needs review
-        vault.executeSlash(claimId);
-    }
-
-    function test_Slashing_SeverityEnforced() public {
-        bytes32 id = _create(PRICE, DURATION);
-        vm.prank(lessee);
-        vault.release(id);
-
-        // Try to submit above the max severity for SERVICE_NOT_DELIVERED (500 bps)
-        vm.prank(lessee);
-        vm.expectRevert(GpuLeaseVault.SeverityExceedsMax.selector);
-        vault.submitSlashingClaim(
-            GpuLeaseVault.SlashingType.SERVICE_NOT_DELIVERED,
-            id,
-            abi.encode("evidence"),
-            501 // exceeds 500 max
-        );
-    }
 
     // ==================================================================
     // FUZZ — the invariants, pinned for arbitrary worlds
