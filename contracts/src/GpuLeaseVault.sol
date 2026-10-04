@@ -44,6 +44,10 @@ contract GpuLeaseVault {
 
     uint16 public constant SCHEMA_VERSION = 1;
 
+    constructor() {
+        _initSeverityLimits();
+    }
+
     /// @dev Total wei currently escrowed for LIVE leases (I1).
     uint256 public totalEscrowed;
     /// @dev Total withdrawable operator earnings, settled and unwithdrawn (I1).
@@ -139,10 +143,120 @@ contract GpuLeaseVault {
     ///         Callable only on settled (Released/Reaped) leases — the RELEASE-
     ///         attested violation path (SPEC §1). Money movement is delegated to
     ///         the staking system; this records the penalty event.
-    function slash(bytes32 leaseId, uint256 amount) external {
+    // ═════════════════════════════════════════════════════════════
+    // SLASHING — unified conditions for compute blueprints (REDTEAM.md)
+    // ═════════════════════════════════════════════════════════════
+
+    enum SlashingType {
+        SERVICE_NOT_DELIVERED,  // 0: accepted lease, no service
+        SERVICE_MISMATCH,       // 1: wrong GPU class / degraded service
+        SERVICE_UNAVAILABLE,    // 2: downtime during paid period
+        ATTESTATION_INVALID,    // 3: TEE claim doesn't match reality
+        LIFECYCLE_VIOLATION     // 4: credentials not revoked at expiry
+    }
+
+    struct SlashingClaim {
+        SlashingType claimType;
+        bytes32 leaseId;
+        address operator;
+        address accuser;
+        bytes evidence;           // type-specific (see REDTEAM.md)
+        uint256 severityBps;      // of operator stake to slash
+        uint256 submittedAt;
+        uint256 challengeDeadline;
+        bool resolved;
+        bool countered;
+    }
+
+    /// Default challenge period for slashing claims.
+    uint256 public constant SLASHING_CHALLENGE_PERIOD = 7 days;
+
+    /// Maximum severity by claim type (bps of operator stake).
+    mapping(uint8 => uint256) public maxSeverityBps;
+
+    mapping(bytes32 => SlashingClaim) public slashingClaims;
+    bytes32[] public slashingClaimIds;
+
+    event SlashingClaimSubmitted(bytes32 indexed claimId, address indexed operator, SlashingType claimType, uint256 severityBps);
+    event SlashingCountered(bytes32 indexed claimId, bytes counterEvidence);
+    event SlashingExecuted(bytes32 indexed claimId, uint256 amount);
+
+    error ClaimNotFound();
+    error ChallengePeriodActive();
+    error ChallengePeriodExpired();
+    error AlreadyResolved();
+    error NotTheAccuser();
+    error SeverityExceedsMax();
+    error ZeroSeverity();
+
+    function _initSeverityLimits() internal {
+        maxSeverityBps[uint8(SlashingType.SERVICE_NOT_DELIVERED)] = 500;   // 5%
+        maxSeverityBps[uint8(SlashingType.SERVICE_MISMATCH)] = 2500;       // 25%
+        maxSeverityBps[uint8(SlashingType.SERVICE_UNAVAILABLE)] = 1000;   // 10%
+        maxSeverityBps[uint8(SlashingType.ATTESTATION_INVALID)] = 10000;  // 100% (eject)
+        maxSeverityBps[uint8(SlashingType.LIFECYCLE_VIOLATION)] = 100;    // 1%
+    }
+
+    /// @notice Submit a slashing claim against an operator.
+    /// @dev The claim is queued, not executed immediately — the operator has
+    ///      a challenge period to submit counter-evidence. After the deadline,
+    ///      anyone can call `executeSlash` to finalize.
+    function submitSlashingClaim(
+        SlashingType claimType,
+        bytes32 leaseId,
+        bytes calldata evidence,
+        uint256 severityBps
+    ) external returns (bytes32 claimId) {
         Lease storage l = leases[leaseId];
-        if (l.state == 0) revert NotLive();
-        emit OperatorSlashed(l.operator, leaseId, amount);
+        if (l.state == 0) revert NotLive(); // must be settled first
+        if (severityBps == 0) revert ZeroSeverity();
+        if (severityBps > maxSeverityBps[uint8(claimType)]) {
+            revert SeverityExceedsMax();
+        }
+        claimId = keccak256(abi.encodePacked(leaseId, claimType, msg.sender, block.timestamp));
+        slashingClaims[claimId] = SlashingClaim({
+            claimType: claimType,
+            leaseId: leaseId,
+            operator: l.operator,
+            accuser: msg.sender,
+            evidence: evidence,
+            severityBps: severityBps,
+            submittedAt: block.timestamp,
+            challengeDeadline: block.timestamp + SLASHING_CHALLENGE_PERIOD,
+            resolved: false,
+            countered: false
+        });
+        slashingClaimIds.push(claimId);
+        emit SlashingClaimSubmitted(claimId, l.operator, claimType, severityBps);
+    }
+
+    /// @notice Operator submits counter-evidence during the challenge period.
+    function counterSlashingClaim(bytes32 claimId, bytes calldata counterEvidence) external {
+        SlashingClaim storage claim = slashingClaims[claimId];
+        if (claim.submittedAt == 0) revert ClaimNotFound();
+        if (claim.resolved) revert AlreadyResolved();
+        if (msg.sender != claim.operator) revert NotLessee(); // only the accused operator
+        if (block.timestamp > claim.challengeDeadline) revert ChallengePeriodExpired();
+        claim.countered = true;
+        emit SlashingCountered(claimId, counterEvidence);
+        // Countered claims require governance/tnt-core review — they don't
+        // auto-execute. The `executeSlash` function checks `!countered`.
+    }
+
+    /// @notice Execute a slash after the challenge period expires.
+    /// @dev Permissionless: anyone can trigger the execution. The actual
+    ///      stake deduction happens in tnt-core's operator staking, which
+    ///      listens for the OperatorSlashed event. This contract records
+    ///      the verdict; the staking system enforces it.
+    function executeSlash(bytes32 claimId) external {
+        SlashingClaim storage claim = slashingClaims[claimId];
+        if (claim.submittedAt == 0) revert ClaimNotFound();
+        if (claim.resolved) revert AlreadyResolved();
+        if (block.timestamp < claim.challengeDeadline) revert ChallengePeriodActive();
+        if (claim.countered) revert AlreadyResolved(); // countered = needs review
+        claim.resolved = true;
+        emit OperatorSlashed(claim.operator, claim.leaseId, claim.severityBps);
+        emit SlashingExecuted(claimId, claim.severityBps);
     }
 
     /// @notice Operators withdraw settled earnings.
