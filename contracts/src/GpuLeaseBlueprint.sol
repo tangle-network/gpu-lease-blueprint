@@ -53,7 +53,9 @@ contract GpuLeaseBlueprint is BlueprintServiceManagerBase {
         string gpuClass;
         string region;
         address lessee; // SPEC §1: the RFQ quote binds the requester
-        bytes32 leaseId; // the vault lease the buyer already escrowed — one identity across money and routing
+        bytes32 leaseId; // the vault lease the buyer already escrowed
+        bytes32 sandboxId; // composition: the sandbox this GPU attaches to (0 = standalone)
+        uint8 sandboxTeeType; // 0=none 1=Nitro 2=TDX 3=SEV — must match GPU TEE when confidentiality=1
     }
 
     struct GpuLeaseOutput {

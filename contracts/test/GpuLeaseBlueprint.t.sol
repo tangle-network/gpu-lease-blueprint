@@ -54,7 +54,9 @@ contract GpuLeaseBlueprintTest is Test {
             gpuClass: "h100",
             region: "us-east",
             lessee: lessee,
-            leaseId: vaultLeaseId
+            leaseId: vaultLeaseId,
+            sandboxId: bytes32(0),
+            sandboxTeeType: 0
         });
         return abi.encode(request);
     }

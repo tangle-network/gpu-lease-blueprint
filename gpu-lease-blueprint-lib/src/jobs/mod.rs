@@ -33,6 +33,22 @@ pub fn canonical_intent(
     )
 }
 
+/// Canonical intent including sandbox composition — binds sandboxId + TEE type
+/// so a quote cannot be replayed against a different sandbox (I5).
+pub fn canonical_intent_with_sandbox(
+    intent_version: u8,
+    gpu_class: &str,
+    duration_seconds: u64,
+    confidentiality: u8,
+    region: &str,
+    sandbox_id: &str,
+    sandbox_tee_type: u8,
+) -> String {
+    format!(
+        "gpu-lease-intent|v{intent_version}|{gpu_class}|{duration_seconds}|{confidentiality}|{region}|{sandbox_id}|{sandbox_tee_type}"
+    )
+}
+
 /// keccak256 of the canonical intent — what the RFQ quote signs and what the
 /// vault stores immutably (I5).
 pub fn intent_hash(

@@ -50,6 +50,12 @@ sol! {
         /// The vault lease the buyer already created and escrowed — one
         /// identity across money and routing (operator binds to THIS id).
         bytes32 leaseId;
+        /// The sandbox this GPU is attached to (composition link — SPEC §5).
+        /// Zero when the lease is standalone (no sandbox attach).
+        bytes32 sandboxId;
+        /// The sandbox's TEE type when confidentiality=1 (composition).
+        /// 0=none, 1=Nitro, 2=TDX, 3=SEV — must match the GPU's TEE.
+        uint8 sandboxTeeType;
     }
 
     /// LEASE job output — PUBLIC DATA ONLY (SPEC §2 Credentials).

@@ -647,6 +647,8 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
             region: region.clone(),
             lessee: buyer,
             leaseId: lease_id.into(),
+            sandboxId: [0u8; 32].into(),
+            sandboxTeeType: 0,
         }
         .abi_encode();
 
@@ -935,6 +937,8 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
             region: region.clone(),
             lessee: buyer,
             leaseId: lease2.into(),
+            sandboxId: [0u8; 32].into(),
+            sandboxTeeType: 0,
         }
         .abi_encode();
         let sub2 = harness.submit_job(JOB_LEASE, Bytes::from(request2)).await?;

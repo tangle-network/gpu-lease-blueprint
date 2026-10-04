@@ -423,12 +423,14 @@ mod tests {
                 id: "gpu-0".into(),
                 gpu_class: "h100".into(),
                 tee: false,
+                tee_type: crate::allocator::TeeType::None,
                 cuda_ordinal: 0,
             },
             GpuDevice {
                 id: "gpu-1".into(),
                 gpu_class: "h100-tee".into(),
                 tee: true,
+                tee_type: crate::allocator::TeeType::Nitro,
                 cuda_ordinal: 1,
             },
         ]);

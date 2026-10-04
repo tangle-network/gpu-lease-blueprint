@@ -157,6 +157,8 @@ mod tests {
                 .parse()
                 .unwrap(),
             leaseId: [7u8; 32].into(),
+            sandboxId: [0u8; 32].into(),
+            sandboxTeeType: 0,
         }
     }
 
@@ -166,6 +168,7 @@ mod tests {
             id: "d1".into(),
             gpu_class: "h100".into(),
             tee: false,
+            tee_type: crate::allocator::TeeType::None,
             cuda_ordinal: 0,
         }]);
         let out = alloc_core(&a, &request(), "0xabc").unwrap();

@@ -23,6 +23,18 @@ pub enum AllocatorError {
     LeaseNotLive([u8; 32]),
 }
 
+/// TEE type - mirrors the ai-agent-sandbox-blueprint's TeeType enum.
+/// 0=none, 1=Nitro (AWS), 2=TDX (Intel), 3=SEV (AMD).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum TeeType {
+    #[default]
+    None = 0,
+    Nitro = 1,
+    Tdx = 2,
+    Sev = 3,
+}
+
 /// A physical, co-located GPU. GPU generations (H100 → B200 → …) are DATA
 /// here — invisible to the contract forever (SPEC §4).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +46,8 @@ pub struct GpuDevice {
     /// a non-TEE device structurally cannot serve a TEE-bound quote).
     pub tee: bool,
     /// CUDA device ordinal for local-attach (v1 placement).
+    #[serde(default)]
+    pub tee_type: TeeType,
     pub cuda_ordinal: u8,
 }
 
@@ -98,6 +112,21 @@ impl GpuAllocator {
         lessee: &str,
         duration_seconds: u64,
     ) -> Result<Allocation, AllocatorError> {
+        self.acquire_with_tee(gpu_class, tee_required, TeeType::None, lease_id, lessee, duration_seconds)
+    }
+
+    /// Acquire with TEE type enforcement: when the lease requires
+    /// confidentiality AND references a sandbox, the GPU's TEE type must
+    /// match the sandbox's TEE type (confidential computing composition).
+    pub fn acquire_with_tee(
+        &self,
+        gpu_class: &str,
+        tee_required: bool,
+        sandbox_tee_type: TeeType,
+        lease_id: [u8; 32],
+        lessee: &str,
+        duration_seconds: u64,
+    ) -> Result<Allocation, AllocatorError> {
         let mut st = self.state.lock().expect("allocator poisoned");
         if st.live.contains_key(&lease_id) {
             return Err(AllocatorError::LeaseAlreadyAllocated(lease_id));
@@ -107,7 +136,9 @@ impl GpuAllocator {
             .devices
             .iter()
             .find(|d| {
-                d.gpu_class == gpu_class && (!tee_required || d.tee) && !st.busy.contains_key(&d.id)
+                d.gpu_class == gpu_class
+                    && (!tee_required || (d.tee && (sandbox_tee_type == TeeType::None || d.tee_type == sandbox_tee_type)))
+                    && !st.busy.contains_key(&d.id)
             })
             .ok_or_else(|| AllocatorError::NoDeviceAvailable {
                 class: gpu_class.to_string(),
@@ -228,6 +259,17 @@ mod tests {
             id: id.into(),
             gpu_class: class.into(),
             tee,
+            tee_type: if tee { TeeType::Nitro } else { TeeType::None },
+            cuda_ordinal: 0,
+        }
+    }
+
+    fn dev_tee_type(id: &str, class: &str, tee_type: TeeType) -> GpuDevice {
+        GpuDevice {
+            id: id.into(),
+            gpu_class: class.into(),
+            tee: tee_type != TeeType::None,
+            tee_type,
             cuda_ordinal: 0,
         }
     }
@@ -286,6 +328,46 @@ mod tests {
         let alloc = a.acquire("h100", false, l, "0xlessee", 100).unwrap();
         let new_exp = a.extend(l, 50).unwrap();
         assert_eq!(new_exp, alloc.expires_at + 50);
+    }
+
+    #[test]
+    fn tee_type_mismatch_rejected() {
+        // A Nitro sandbox + TDX GPU = rejected even though both are TEE.
+        let a = GpuAllocator::new(vec![
+            dev_tee_type("gpu-tdx", "h100-tee", TeeType::Tdx),
+        ]);
+        let result = a.acquire_with_tee(
+            "h100-tee", true, TeeType::Nitro,
+            [1u8; 32], "0xabc", 60,
+        );
+        assert!(matches!(result, Err(AllocatorError::NoDeviceAvailable { .. })));
+    }
+
+    #[test]
+    fn tee_type_match_succeeds() {
+        // A Nitro sandbox + Nitro GPU = allocated.
+        let a = GpuAllocator::new(vec![
+            dev_tee_type("gpu-nitro", "h100-tee", TeeType::Nitro),
+        ]);
+        let alloc = a.acquire_with_tee(
+            "h100-tee", true, TeeType::Nitro,
+            [1u8; 32], "0xabc", 60,
+        );
+        assert!(alloc.is_ok());
+        assert_eq!(alloc.unwrap().device_id, "gpu-nitro");
+    }
+
+    #[test]
+    fn standalone_tee_lease_ignores_sandbox_type() {
+        // No sandbox TEE specified (standalone TEE lease) → any TEE GPU works.
+        let a = GpuAllocator::new(vec![
+            dev_tee_type("gpu-sev", "h100-tee", TeeType::Sev),
+        ]);
+        let alloc = a.acquire_with_tee(
+            "h100-tee", true, TeeType::None,
+            [1u8; 32], "0xabc", 60,
+        );
+        assert!(alloc.is_ok());
     }
 
     #[test]

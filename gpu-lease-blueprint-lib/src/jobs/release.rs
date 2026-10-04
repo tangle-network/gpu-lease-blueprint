@@ -40,6 +40,7 @@ mod tests {
             id: "d1".into(),
             gpu_class: "h100".into(),
             tee: false,
+            tee_type: crate::allocator::TeeType::None,
             cuda_ordinal: 0,
         }]);
         let lease = [11u8; 32];
