@@ -24,6 +24,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::timeout;
 
 const DEMO_TIMEOUT: Duration = Duration::from_secs(600);
+/// Operator quote-signing key (mirrors anvil.rs — the SDK verifies it client-side).
+const QUOTE_SIGNING_KEY: &str = "4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d";
 const GPU_INVENTORY: &str = r#"[{"id":"gpu-0","gpu_class":"h100","tee":false,"cuda_ordinal":0}]"#;
 const VAULT_ARTIFACT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -133,6 +135,7 @@ async fn run_demo() -> Result<()> {
         let harness = BlueprintHarness::builder(router())
             .poll_interval(Duration::from_millis(50))
             .with_env_var("GPU_INVENTORY_JSON", GPU_INVENTORY)
+            .with_env_var("GPU_QUOTE_SIGNING_KEY", QUOTE_SIGNING_KEY)
             .spawn()
             .await
             .map_err(|e| {

@@ -19,7 +19,7 @@ use blueprint_sdk::alloy::sol;
 use blueprint_sdk::tangle::TangleLayer;
 
 pub use allocator::{Allocation, AllocatorError, GpuAllocator};
-pub use credentials::{CredentialError, CredentialSessions, ScopedCredential};
+pub use credentials::{CredentialError, CredentialSessions, ScopedCredential, eip191_recover_signer, eip191_sign_message, verifying_key_address};
 pub use quote::{QuoteInputs, QuotePolicy, QuoteValidationError};
 
 /// Job IDs — MUST match the sequential indices in the blueprint registration

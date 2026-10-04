@@ -55,6 +55,8 @@ fn setup_log() {
 
 /// One co-located H100, non-TEE — the operator's advertised inventory
 /// (SPEC §4: no on-chain registry; this is operator-local truth).
+/// Operator quote-signing key (test-constant; production feeds the runner keystore).
+const QUOTE_SIGNING_KEY: &str = "4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d";
 const GPU_INVENTORY: &str = r#"[{"id":"gpu-0","gpu_class":"h100","tee":false,"cuda_ordinal":0}]"#;
 
 async fn spawn_harness() -> Result<Option<BlueprintHarness>> {
@@ -64,6 +66,7 @@ async fn spawn_harness() -> Result<Option<BlueprintHarness>> {
         match BlueprintHarness::builder(router())
             .poll_interval(Duration::from_millis(50))
             .with_env_var("GPU_INVENTORY_JSON", GPU_INVENTORY)
+        .with_env_var("GPU_QUOTE_SIGNING_KEY", QUOTE_SIGNING_KEY)
             .spawn()
             .await
         {
@@ -739,6 +742,27 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
                 quote["pricePerSecond"].as_str() == Some(&expected.to_string()),
                 "quote {quote:?} != saturated policy price {expected}"
             );
+
+            // Signed RFQ envelope: signature present and recovers to the
+            // claimed operator address over the canonical payload.
+            let sig = quote["signature"].as_str().context("quote must be signed")?;
+            let claimed = quote["operatorAddress"].as_str().context("operatorAddress")?;
+            let payload = gpu_lease_blueprint_lib::api::canonical_quote_payload(
+                "h100",
+                &expected.to_string(),
+                600,
+                0,
+                &(expected * 600).to_string(),
+                quote["intentHash"].as_str().unwrap(),
+                quote["validUntil"].as_u64().unwrap(),
+            );
+            let recovered = gpu_lease_blueprint_lib::eip191_recover_signer(
+                &payload,
+                sig.trim_start_matches("0x"),
+            )
+            .context("signature must recover")?;
+            anyhow::ensure!(recovered == claimed, "recovered {recovered} != claimed {claimed}");
+            eprintln!("operator API leg: signed quote verified, operator={claimed}");
 
             // Lease status: public data only, reflects the live allocation.
             let status = http_json(

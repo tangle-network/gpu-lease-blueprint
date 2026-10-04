@@ -293,6 +293,38 @@ pub fn eip191_recover_signer(
     Ok(format!("0x{}", hex::encode(&hash[12..])))
 }
 
+/// EIP-191 `personal_sign` with a raw secp256k1 key. Returns (rsv_hex, address)
+/// where address is the signer's derived EVM address — the recovered-address
+/// counterpart `eip191_recover_signer` must reproduce exactly.
+pub fn eip191_sign_message(
+    signing_key: &k256::ecdsa::SigningKey,
+    message: &str,
+) -> Result<(String, String), CredentialError> {
+    use k256::ecdsa::signature::Signer;
+    let digest = eip191_personal_message_digest(message);
+    let (sig, rec_id) = signing_key
+        .sign_prehash_recoverable(&digest)
+        .map_err(|_| CredentialError::RecoveryFailed)?;
+    let mut rsv = sig.to_bytes().to_vec();
+    rsv.push(u8::from(rec_id.is_y_odd()) + 27);
+    let vk = k256::ecdsa::VerifyingKey::from(signing_key);
+    let addr = verifying_key_address(&vk)?;
+    Ok((hex::encode(rsv), addr))
+}
+
+/// EVM address of a secp256k1 verifying key: keccak(uncompressed pubkey)[12..].
+pub fn verifying_key_address(
+    vk: &k256::ecdsa::VerifyingKey,
+) -> Result<String, CredentialError> {
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    let point = vk.to_encoded_point(false);
+    let mut k = Keccak::v256();
+    k.update(&point.as_bytes()[1..]);
+    let mut hash = [0u8; 32];
+    k.finalize(&mut hash);
+    Ok(format!("0x{}", hex::encode(&hash[12..])))
+}
+
 /// keccak256("\x19Ethereum Signed Message:\n" || len || message)
 pub fn eip191_personal_message_digest(message: &str) -> [u8; 32] {
     let prefixed = format!("\x19Ethereum Signed Message:\n{}{}", message.len(), message);

@@ -99,6 +99,45 @@ pub struct QuoteResponse {
     pub intent_hash: String,
     /// Quote validity window (unix seconds).
     pub valid_until: u64,
+    /// The operator's EVM address (derived from the quote signing key). Present
+    /// iff signed; the client MUST verify the signature and use the recovered
+    /// address — never a config-trusted one.
+    pub operator_address: Option<String>,
+    /// EIP-191 personal_sign over [`canonical_quote_payload`] (0x-prefixed RSV).
+    pub signature: Option<String>,
+}
+
+/// The exact string the operator signs over a quote — every priced field is
+/// bound. The SDK mirrors this byte-for-byte (`gpu-lease/quotes.ts`).
+pub fn canonical_quote_payload(
+    gpu_class: &str,
+    price_per_second: &str,
+    duration_seconds: u64,
+    confidentiality: u8,
+    escrow_total: &str,
+    intent_hash: &str,
+    valid_until: u64,
+) -> String {
+    format!(
+        "gpu-lease-quote|v1|{gpu_class}|{price_per_second}|{duration_seconds}|{confidentiality}|{escrow_total}|{intent_hash}|{valid_until}"
+    )
+}
+
+/// Operator quote-signing identity. Key from `GPU_QUOTE_SIGNING_KEY` (hex,
+/// 32 bytes) — operator-local config, hot-reloadable, NEVER on-chain. When
+/// unset, quotes are returned unsigned and clients fall back to their
+/// endpoint-config address (interim; verified path is the default posture).
+struct QuoteSigner {
+    key: k256::ecdsa::SigningKey,
+}
+
+impl QuoteSigner {
+    fn from_env() -> Option<Self> {
+        let hex_key = std::env::var("GPU_QUOTE_SIGNING_KEY").ok()?;
+        let bytes = hex::decode(hex_key.trim_start_matches("0x")).ok()?;
+        let key = k256::ecdsa::SigningKey::from_slice(&bytes).ok()?;
+        Some(Self { key })
+    }
 }
 
 /// Public lease status — endpoint descriptor + session facts. NEVER contains
@@ -247,6 +286,28 @@ async fn quote(
         req.confidentiality,
         &region,
     );
+    let intent_hash = format!("0x{}", hex::encode(intent));
+    let valid_until = crate::allocator::unix_now() + 60;
+
+    // Signed RFQ envelope (#1568 pattern): sign every priced field.
+    let (operator_address, signature) = match QuoteSigner::from_env() {
+        Some(signer) => {
+            let payload = canonical_quote_payload(
+                &req.gpu_class,
+                &quote.price_per_second.to_string(),
+                req.duration_seconds,
+                req.confidentiality,
+                &quote.escrow_total.to_string(),
+                &intent_hash,
+                valid_until,
+            );
+            let (rsv, address) = crate::eip191_sign_message(&signer.key, &payload)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            (Some(address), Some(format!("0x{rsv}")))
+        }
+        None => (None, None),
+    };
+
     Ok(AxumJson(QuoteResponse {
         schema_version: crate::SCHEMA_VERSION,
         gpu_class: quote.gpu_class,
@@ -255,8 +316,10 @@ async fn quote(
         confidentiality: quote.confidentiality,
         escrow_total: quote.escrow_total.to_string(),
         utilization_bps,
-        intent_hash: format!("0x{}", hex::encode(intent)),
-        valid_until: crate::allocator::unix_now() + 60,
+        intent_hash,
+        valid_until,
+        operator_address,
+        signature,
     }))
 }
 
@@ -459,6 +522,37 @@ mod tests {
             body["intentHash"].as_str().unwrap(),
             format!("0x{}", hex::encode(want))
         );
+    }
+
+    #[tokio::test]
+    async fn quote_is_signed_and_recovers_to_the_operator_address() {
+        // SAFETY: test-only env before any assertion on quotes; other quote
+        // tests do not depend on the unsigned shape.
+        unsafe { std::env::set_var("GPU_QUOTE_SIGNING_KEY", hex::encode([77u8; 32])) };
+        let state = test_state();
+        let (status, body) = post_json(
+            &state,
+            "/api/quote",
+            serde_json::json!({ "gpuClass": "h100", "durationSeconds": 600 }),
+        )
+        .await;
+        unsafe { std::env::remove_var("GPU_QUOTE_SIGNING_KEY") };
+        assert_eq!(status, StatusCode::OK, "body: {body}");
+        let signature = body["signature"].as_str().expect("signed quote").to_string();
+        let operator_address = body["operatorAddress"].as_str().expect("operator address").to_string();
+        // Client-side verification, exactly as the SDK does it.
+        let payload = canonical_quote_payload(
+            "h100",
+            body["pricePerSecond"].as_str().unwrap(),
+            600,
+            0,
+            body["escrowTotal"].as_str().unwrap(),
+            body["intentHash"].as_str().unwrap(),
+            body["validUntil"].as_u64().unwrap(),
+        );
+        let recovered = crate::eip191_recover_signer(&payload, signature.trim_start_matches("0x"))
+            .expect("signature must recover");
+        assert_eq!(recovered, operator_address, "recovered address == claimed operator address");
     }
 
     #[tokio::test]
@@ -666,5 +760,48 @@ mod globals_min {
         let a2 = crate::allocator();
         assert_eq!(a2.inventory().len(), 1);
         assert_eq!(a.idle_count("h100", false), 1, "first handle still valid");
+    }
+}
+
+#[cfg(test)]
+mod quote_signing_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_payload_is_stable_and_field_bound() {
+        let a = canonical_quote_payload(
+            "h100", "240000000000000", 600, 0, "144000000000000000",
+            "0x1111111111111111111111111111111111111111111111111111111111111111", 4102444800,
+        );
+        assert_eq!(
+            a,
+            "gpu-lease-quote|v1|h100|240000000000000|600|0|144000000000000000|0x1111111111111111111111111111111111111111111111111111111111111111|4102444800"
+        );
+        // Every priced field is bound — mutate any one and the payload changes.
+        let b = canonical_quote_payload(
+            "h100", "240000000000001", 600, 0, "144000000000000000",
+            "0x1111111111111111111111111111111111111111111111111111111111111111", 4102444800,
+        );
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn sign_then_recover_roundtrips_exactly() {
+        let key = k256::ecdsa::SigningKey::from_slice(&[77u8; 32]).unwrap();
+        let payload = canonical_quote_payload(
+            "h100", "240000000000000", 600, 0, "144000000000000000",
+            "0x2222222222222222222222222222222222222222222222222222222222222222", 4102444800,
+        );
+        let (rsv, address) = crate::eip191_sign_message(&key, &payload).unwrap();
+        // The client-side recovery (same function the API verifies with):
+        let recovered = crate::eip191_recover_signer(&payload, &rsv).unwrap();
+        assert_eq!(recovered, address, "recovered address must equal signer address");
+        // Tamper any field => recovery yields a different address (fail-closed binding)
+        let tampered = canonical_quote_payload(
+            "h100", "999999999999999", 600, 0, "144000000000000000",
+            "0x2222222222222222222222222222222222222222222222222222222222222222", 4102444800,
+        );
+        let recovered_tampered = crate::eip191_recover_signer(&tampered, &rsv).unwrap();
+        assert_ne!(recovered_tampered, address, "tampered payload must not verify to the signer");
     }
 }
