@@ -26,7 +26,7 @@ use tokio::time::timeout;
 const DEMO_TIMEOUT: Duration = Duration::from_secs(600);
 /// Operator quote-signing key (mirrors anvil.rs — the SDK verifies it client-side).
 const QUOTE_SIGNING_KEY: &str = "4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d";
-const GPU_INVENTORY: &str = r#"[{"id":"gpu-0","gpu_class":"h100","tee":false,"cuda_ordinal":0}]"#;
+const GPU_INVENTORY: &str = r#"[{"id":"gpu-0","gpu_class":"h100","tee":false,"cuda_ordinal":0},{"id":"gpu-1","gpu_class":"h100","tee":false,"cuda_ordinal":1}]"#;
 const VAULT_ARTIFACT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../contracts/out/GpuLeaseVault.sol/GpuLeaseVault.json"
@@ -176,13 +176,22 @@ async fn run_demo() -> Result<()> {
         eprintln!("[demo] vault deployed at {vault:#x}");
 
         // 4. Fresh buyer key (deterministic demo key), funded + permitted on the service.
+        // The service owner (harness caller) permits job submitters.
+        let service_owner = harness.caller_account();
+        // Broker treasury key (anvil well-known #5). The address is DERIVED
+        // with viem itself — never hand-copied.
+        const DEMO_TREASURY_KEY: &str = "0x8166f546333643e517fd0b7dcf8b3f23fbfbd3ae5f2ea5c34bf5e58b37f07f56";
+        let treasury: Address = derive_address_with_sdk(&sdk_dir, DEMO_TREASURY_KEY).await?;
+        raw(&rpc, "anvil_setBalance", serde_json::json!([format!("{treasury:#x}"), "0x3635c9adc5dea0000000000"])).await?;
+        let permit_treasury = gpu_lease_demo_abi::encode_add_permitted_caller(service_id, treasury);
+        impersonated_send(&rpc, service_owner, Some(tangle), permit_treasury, U256::ZERO).await?;
+        eprintln!("[demo] broker treasury {treasury:#x} funded + permitted");
+
         // Deterministic demo key (anvil well-known list). The address is DERIVED
         // with viem itself — never hand-copied, never drifted.
         const DEMO_BUYER_KEY: &str = "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba";
         let buyer: Address = derive_address_with_sdk(&sdk_dir, DEMO_BUYER_KEY).await?;
         raw(&rpc, "anvil_setBalance", serde_json::json!([format!("{buyer:#x}"), "0x3635c9adc5dea0000000000"])).await?;
-        // The service owner (harness caller) permits the buyer to submit jobs.
-        let service_owner = harness.caller_account();
         let permit = gpu_lease_demo_abi::encode_add_permitted_caller(service_id, buyer);
         impersonated_send(&rpc, service_owner, Some(tangle), permit, U256::ZERO).await?;
         eprintln!("[demo] buyer {buyer:#x} permitted on service {service_id}");
@@ -214,6 +223,28 @@ async fn run_demo() -> Result<()> {
             .status()
             .context("failed to spawn `corepack pnpm vitest` (is the SDK worktree installed?)")?;
         anyhow::ensure!(status.success(), "TS demo failed with {status}");
+
+        // ── Sponsored (broker) leg: the treasury drives the same resolver with
+        //     the FromPrivateKey transport — the USD rail's server-side proof.
+        let broker_status = std::process::Command::new("corepack")
+            .arg("pnpm")
+            .arg("vitest")
+            .arg("run")
+            .arg("tests/unit/gpu-lease-broker-demo.test.ts")
+            .arg("--disableConsoleIntercept")
+            .current_dir(&sdk_dir)
+            .env("DEMO_BROKER", "1")
+            .env("DEMO_RPC_URL", &rpc)
+            .env("DEMO_OPERATOR_URL", &operator_url)
+            .env("DEMO_VAULT_ADDRESS", format!("{vault:#x}"))
+            .env("DEMO_TANGLE_ADDRESS", format!("{tangle:#x}"))
+            .env("DEMO_SERVICE_ID", service_id.to_string())
+            .env("DEMO_TREASURY_KEY", DEMO_TREASURY_KEY)
+            .env("DEMO_OPERATOR_ADDRESS", format!("{operator_address:#x}"))
+            .env("DEMO_DURATION_SECONDS", "600")
+            .status()
+            .context("failed to spawn broker demo child")?;
+        anyhow::ensure!(broker_status.success(), "broker demo failed with {broker_status}");
 
         harness.shutdown().await;
         Ok(())
