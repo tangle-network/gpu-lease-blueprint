@@ -108,6 +108,8 @@ contract RegisterGpuLeaseBlueprint is Script {
         def.registrationSchema = "";
         def.requestSchema = "";
         def.sources = _buildSources();
+        def.supportedMemberships = new Types.MembershipModel[](1);
+        def.supportedMemberships[0] = Types.MembershipModel.Dynamic;
     }
 
     /// Minimal valid container source (protocol requires >=1 source with >=1
