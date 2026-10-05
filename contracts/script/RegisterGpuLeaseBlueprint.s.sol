@@ -33,7 +33,7 @@ contract RegisterGpuLeaseBlueprint is Script {
         vm.startBroadcast(deployerKey);
 
         GpuLeaseVault vault = new GpuLeaseVault();
-        GpuLeaseBlueprint bsm = new GpuLeaseBlueprint(address(vault));
+        GpuLeaseBlueprint bsm = new GpuLeaseBlueprint(address(vault), address(0));
 
         uint64 blueprintId = tangle.createBlueprint(_buildDefinition(address(bsm)));
 

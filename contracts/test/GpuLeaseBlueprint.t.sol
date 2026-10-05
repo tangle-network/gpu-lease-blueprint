@@ -33,7 +33,7 @@ contract GpuLeaseBlueprintTest is Test {
 
     function setUp() public {
         vault = new GpuLeaseVault();
-        bsm = new GpuLeaseBlueprint(address(vault));
+        bsm = new GpuLeaseBlueprint(address(vault), address(0));
         jobLease = bsm.JOB_LEASE();
         jobRelease = bsm.JOB_RELEASE();
         // tnt-core initializes the BSM at blueprint creation.
