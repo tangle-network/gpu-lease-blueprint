@@ -98,7 +98,7 @@ curl -s "http://127.0.0.1:$OPERATOR_PORT/api/capabilities" | python3 -c "import 
 # ── 4b. Second operator (9201) — smaller inventory, its own cheaper policy,
 # so the web market proves per-operator pricing for the same GPU class. ──
 OPERATOR2_PORT=9201
-OPERATOR2_KEY=0x3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e
+OPERATOR2_KEY=0x3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e
 GPU_INVENTORY_JSON='[
   {"id":"gpu-b0","gpu_class":"h100","tee":false,"tee_type":"None","cuda_ordinal":4},
   {"id":"gpu-b1","gpu_class":"b200","tee":false,"tee_type":"None","cuda_ordinal":5}
