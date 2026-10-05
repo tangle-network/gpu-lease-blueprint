@@ -38,34 +38,26 @@ echo "  ✓ anvil chain on :8545 (chain 31337)"
 DEPLOYER="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 BUYER="0xc8ee3018d2fdac71ec08c1913212da42fa92a4b6"
 
+# NOTE: cast deploy no longer exists in foundry ≥1.8 — forge script/create is
+# the supported path. The vault script prints GPU_LEASE_VAULT=<addr> on success.
 VAULT_OUT=$(forge script contracts/script/DeployGpuLeaseVault.s.sol \
   --rpc-url $RPC_URL \
   --broadcast \
   --private-key $DEPLOYER_KEY 2>&1 | grep "GPU_LEASE_VAULT=" | cut -d= -f2 | tr -d ' ')
-VAULT_ADDR=$(cast code $VAULT_OUT --rpc-url $RPC_URL | head -c 10)
-if [ "$VAULT_ADDR" = "0x" ]; then
-  # Fallback: deploy directly via cast
-  VAULT_CODE=$(python3 -c "
-import json
-a = json.load(open('contracts/out/GpuLeaseVault.sol/GpuLeaseVault.json'))
-print(a['bytecode']['object'])")
-  VAULT_ADDR=$(cast deploy --rpc-url $RPC_URL --private-key $DEPLOYER_KEY "$VAULT_CODE" 2>&1 | tail -1 | grep -oE '0x[0-9a-fA-F]{40}')
-fi
-
-if [ -z "$VAULT_ADDR" ]; then
+if [ -z "$VAULT_OUT" ] || [ "${#VAULT_OUT}" -ne 42 ]; then
   echo "FAIL: vault deployment failed"
   exit 1
 fi
+VAULT_ADDR=$VAULT_OUT
 echo "  ✓ vault deployed at $VAULT_ADDR"
 
-# Deploy the BSM
-BSM_CODE=$(python3 -c "
-import json
-a = json.load(open('contracts/out/GpuLeaseBlueprint.sol/GpuLeaseBlueprint.json'))
-print(a['bytecode']['object'])")
-# Constructor arg: vault address (encoded as 32-byte pad)
-BSM_ARG=$(cast abi-encode "f(address)" $VAULT_ADDR)
-BSM_ADDR=$(cast deploy --rpc-url $RPC_URL --private-key $DEPLOYER_KEY "$BSM_CODE" "$BSM_ARG" 2>&1 | tail -1 | grep -oE '0x[0-9a-fA-F]{40}')
+# Deploy the BSM (constructor: vault + slashing verifier; zero verifier is
+# fine for the local demo — no slashing flows are exercised).
+BSM_ADDR=$(forge create contracts/src/GpuLeaseBlueprint.sol:GpuLeaseBlueprint \
+  --constructor-args "$VAULT_ADDR" "0x0000000000000000000000000000000000000000" \
+  --rpc-url $RPC_URL \
+  --private-key $DEPLOYER_KEY \
+  --broadcast 2>&1 | grep -oE 'Deployed to: 0x[0-9a-fA-F]{40}' | grep -oE '0x[0-9a-fA-F]{40}')
 
 if [ -z "$BSM_ADDR" ]; then
   echo "FAIL: BSM deployment failed"
@@ -82,12 +74,15 @@ OPERATOR_ADDR=$(cast wallet address $OPERATOR_KEY)
 echo "  ✓ operator address: $OPERATOR_ADDR"
 
 # ── 4. Operator API ───────────────────────────────────────────
+# NOTE: tee_type is a serde enum — it takes VARIANT NAMES ("None"/"Nitro"/…),
+# not integers. An integer here fails the whole array's parse and the operator
+# silently serves zero inventory.
 GPU_INVENTORY_JSON='[
-  {"id":"gpu-0","gpu_class":"h100","tee":false,"tee_type":0,"cuda_ordinal":0},
-  {"id":"gpu-1","gpu_class":"h100-tee","tee":true,"tee_type":1,"cuda_ordinal":1},
-  {"id":"gpu-2","gpu_class":"a100-80gb","tee":false,"tee_type":0,"cuda_ordinal":2},
-  {"id":"gpu-3","gpu_class":"b200","tee":false,"tee_type":0,"cuda_ordinal":3}
-]' \
+  {"id":"gpu-0","gpu_class":"h100","tee":false,"tee_type":"None","cuda_ordinal":0},
+  {"id":"gpu-1","gpu_class":"h100-tee","tee":true,"tee_type":"Nitro","cuda_ordinal":1},
+  {"id":"gpu-2","gpu_class":"a100-80gb","tee":false,"tee_type":"None","cuda_ordinal":2},
+  {"id":"gpu-3","gpu_class":"b200","tee":false,"tee_type":"None","cuda_ordinal":3}
+]}' \
 GPU_QUOTE_SIGNING_KEY=$OPERATOR_KEY \
 OPERATOR_API_LISTEN="127.0.0.1:$OPERATOR_PORT" \
   nohup target/debug/examples/operator_api > /tmp/demo-operator.log 2>&1 &
