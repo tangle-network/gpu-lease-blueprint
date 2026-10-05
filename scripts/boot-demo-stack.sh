@@ -95,13 +95,29 @@ curl -s "http://127.0.0.1:$OPERATOR_PORT/api/capabilities" | python3 -c "import 
   exit 1
 }
 
+# ── 4b. Second operator (9201) — smaller inventory, its own cheaper policy,
+# so the web market proves per-operator pricing for the same GPU class. ──
+OPERATOR2_PORT=9201
+OPERATOR2_KEY=0x3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e
+GPU_INVENTORY_JSON='[
+  {"id":"gpu-b0","gpu_class":"h100","tee":false,"tee_type":"None","cuda_ordinal":4},
+  {"id":"gpu-b1","gpu_class":"b200","tee":false,"tee_type":"None","cuda_ordinal":5}
+]' \
+GPU_QUOTE_POLICY_JSON='{"base_price_per_second":{"h100":210000000000000,"b200":700000000000000},"class_bps":{},"tee_premium_bps":2500,"utilization_curve":[[0,8000],[5000,10000],[10000,12000]],"min_duration_seconds":60,"max_duration_seconds":2592000}' \
+GPU_QUOTE_SIGNING_KEY=$OPERATOR2_KEY \
+OPERATOR_API_LISTEN="127.0.0.1:$OPERATOR2_PORT" \
+  nohup target/debug/examples/operator_api > /tmp/demo-operator2.log 2>&1 &
+OPERATOR2_PID=$!
+sleep 1
+curl -s "http://127.0.0.1:$OPERATOR2_PORT/api/capabilities" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['schemaVersion']==1; print(f'  ✓ operator API #2 on :$OPERATOR2_PORT (cheaper h100/b200)')" || echo "WARN: operator #2 didn't start"}
+
 # ── 5. Print the env vars ─────────────────────────────────────
 # For the web app, the "tangle" address is the BSM (where job calls go).
 # Service ID is 0 (the test service).
 echo ""
 echo "── Web app env vars ────────────────────────────────────────"
 cat << EOF
-VITE_GPU_LEASE_OPERATOR_URL=http://127.0.0.1:$OPERATOR_PORT
+VITE_GPU_LEASE_OPERATORS=http://127.0.0.1:$OPERATOR_PORT,http://127.0.0.1:$OPERATOR2_PORT
 VITE_GPU_LEASE_RPC_URL=$RPC_URL
 VITE_GPU_LEASE_VAULT_ADDRESS=$VAULT_ADDR
 VITE_GPU_LEASE_TANGLE_ADDRESS=$BSM_ADDR
@@ -111,7 +127,7 @@ VITE_TNT_USD=0.35
 EOF
 
 echo ""
-echo "── Stack PIDs (kill with: kill $ANVIL_PID $OPERATOR_PID) ──"
+echo "── Stack PIDs (kill with: kill $ANVIL_PID $OPERATOR_PID $OPERATOR2_PID) ──"
 echo "ANVIL_PID=$ANVIL_PID"
 echo "OPERATOR_PID=$OPERATOR_PID"
 echo ""
