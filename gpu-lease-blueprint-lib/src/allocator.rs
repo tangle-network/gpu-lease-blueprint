@@ -201,7 +201,10 @@ impl GpuAllocator {
             lease_id,
             device_ids: devices.iter().map(|d| d.id.clone()).collect(),
             expires_at,
-            lessee: lessee.to_string(),
+            // Lowercase EVM identifier — addresses are identifiers here, not
+            // display strings; wallets send either case (EIP-55 checksummed
+            // or lowercase) and comparisons must never depend on the case.
+            lessee: lessee.to_ascii_lowercase(),
             endpoint_v1,
         };
         for device in &devices {

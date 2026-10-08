@@ -378,7 +378,9 @@ async fn session_challenge(
         .allocator
         .allocation(id)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown or settled lease"))?;
-    if alloc.lessee != req.lessee {
+    // Case-insensitive identity: wallets send EIP-55 checksummed addresses;
+    // the allocator stores lowercase. Same address, same lease.
+    if !alloc.lessee.eq_ignore_ascii_case(&req.lessee) {
         return Err(err(StatusCode::FORBIDDEN, "not the lease's lessee"));
     }
     let ch = state.credentials.issue_challenge(id, &req.lessee);
