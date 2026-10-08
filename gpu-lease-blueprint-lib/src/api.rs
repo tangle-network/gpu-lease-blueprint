@@ -80,6 +80,13 @@ pub struct QuoteRequest {
     pub confidentiality: u8,
     #[serde(default)]
     pub region: Option<String>,
+    /// Devices to rent — escrow scales per device (default 1).
+    #[serde(default = "one_device")]
+    pub device_count: u16,
+}
+
+fn one_device() -> u16 {
+    1
 }
 
 #[derive(Serialize)]
@@ -90,6 +97,7 @@ pub struct QuoteResponse {
     pub price_per_second: String,
     pub duration_seconds: u64,
     pub confidentiality: u8,
+    pub device_count: u16,
     pub escrow_total: String,
     /// Current utilization the price was struck at — the driver renders the
     /// "why" (surge indicator) from this.
@@ -114,12 +122,13 @@ pub fn canonical_quote_payload(
     price_per_second: &str,
     duration_seconds: u64,
     confidentiality: u8,
+    device_count: u16,
     escrow_total: &str,
     intent_hash: &str,
     valid_until: u64,
 ) -> String {
     format!(
-        "gpu-lease-quote|v1|{gpu_class}|{price_per_second}|{duration_seconds}|{confidentiality}|{escrow_total}|{intent_hash}|{valid_until}"
+        "gpu-lease-quote|v2|{gpu_class}|{price_per_second}|{duration_seconds}|{confidentiality}|{device_count}|{escrow_total}|{intent_hash}|{valid_until}"
     )
 }
 
@@ -148,7 +157,8 @@ impl QuoteSigner {
 pub struct LeaseStatus {
     pub schema_version: u16,
     pub lease_id: String,
-    pub device_id: String,
+    /// Every device bound to the lease (one per rented GPU).
+    pub device_ids: Vec<String>,
     pub lessee: String,
     pub expires_at: u64,
     pub endpoint: String,
@@ -286,6 +296,7 @@ async fn quote(
         gpu_class: req.gpu_class.clone(),
         duration_seconds: req.duration_seconds,
         confidentiality: req.confidentiality,
+        device_count: req.device_count,
         utilization_bps,
     };
     let quote = policy
@@ -293,11 +304,12 @@ async fn quote(
         .map_err(|e: QuoteValidationError| err(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     let region = req.region.clone().unwrap_or_else(|| "any".to_string());
     let intent = crate::jobs::intent_hash(
-        1,
+        crate::INTENT_VERSION,
         &req.gpu_class,
         req.duration_seconds,
         req.confidentiality,
         &region,
+        req.device_count,
     );
     let intent_hash = format!("0x{}", hex::encode(intent));
     let valid_until = crate::allocator::unix_now() + 60;
@@ -310,6 +322,7 @@ async fn quote(
                 &quote.price_per_second.to_string(),
                 req.duration_seconds,
                 req.confidentiality,
+                req.device_count,
                 &quote.escrow_total.to_string(),
                 &intent_hash,
                 valid_until,
@@ -327,6 +340,7 @@ async fn quote(
         price_per_second: quote.price_per_second.to_string(),
         duration_seconds: quote.duration_seconds,
         confidentiality: quote.confidentiality,
+        device_count: quote.device_count,
         escrow_total: quote.escrow_total.to_string(),
         utilization_bps,
         intent_hash,
@@ -348,7 +362,7 @@ async fn lease_status(
     Ok(AxumJson(LeaseStatus {
         schema_version: crate::SCHEMA_VERSION,
         lease_id: format!("0x{}", hex::encode(id)),
-        device_id: alloc.device_id,
+        device_ids: alloc.device_ids,
         lessee: alloc.lessee,
         expires_at: alloc.expires_at,
         endpoint: alloc.endpoint_v1,
@@ -532,7 +546,7 @@ mod tests {
             (expected * 3600).to_string()
         );
         // Intent hash binds the exact request (region defaults to "any").
-        let want = crate::jobs::intent_hash(1, "h100", 3600, 0, "any");
+        let want = crate::jobs::intent_hash(crate::INTENT_VERSION, "h100", 3600, 0, "any", 1);
         assert_eq!(
             body["intentHash"].as_str().unwrap(),
             format!("0x{}", hex::encode(want))
@@ -553,21 +567,31 @@ mod tests {
         .await;
         unsafe { std::env::remove_var("GPU_QUOTE_SIGNING_KEY") };
         assert_eq!(status, StatusCode::OK, "body: {body}");
-        let signature = body["signature"].as_str().expect("signed quote").to_string();
-        let operator_address = body["operatorAddress"].as_str().expect("operator address").to_string();
+        let signature = body["signature"]
+            .as_str()
+            .expect("signed quote")
+            .to_string();
+        let operator_address = body["operatorAddress"]
+            .as_str()
+            .expect("operator address")
+            .to_string();
         // Client-side verification, exactly as the SDK does it.
         let payload = canonical_quote_payload(
             "h100",
             body["pricePerSecond"].as_str().unwrap(),
             600,
             0,
+            1,
             body["escrowTotal"].as_str().unwrap(),
             body["intentHash"].as_str().unwrap(),
             body["validUntil"].as_u64().unwrap(),
         );
         let recovered = crate::eip191_recover_signer(&payload, signature.trim_start_matches("0x"))
             .expect("signature must recover");
-        assert_eq!(recovered, operator_address, "recovered address == claimed operator address");
+        assert_eq!(
+            recovered, operator_address,
+            "recovered address == claimed operator address"
+        );
     }
 
     #[tokio::test]
@@ -592,11 +616,11 @@ mod tests {
         let lease = [9u8; 32];
         state
             .allocator
-            .acquire("h100", false, lease, "0xabc", 60)
+            .acquire("h100", false, 1, lease, "0xabc", 60)
             .unwrap();
         let (status, body) = get_json(&state, &format!("/api/leases/{}", hex::encode(lease))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["deviceId"], "gpu-0");
+        assert_eq!(body["deviceIds"], serde_json::json!(["gpu-0"]));
         assert_eq!(body["schemaVersion"], 1);
         let s = body.to_string();
         assert!(!s.contains("token"), "no credential material in status");
@@ -618,7 +642,7 @@ mod tests {
         let lease = [5u8; 32];
         state
             .allocator
-            .acquire("h100", false, lease, &lessee, 600)
+            .acquire("h100", false, 1, lease, &lessee, 600)
             .unwrap();
 
         // Challenge is lessee-bound.
@@ -683,7 +707,7 @@ mod tests {
         let lease = [6u8; 32];
         state
             .allocator
-            .acquire("h100", false, lease, "0xowner", 60)
+            .acquire("h100", false, 1, lease, "0xowner", 60)
             .unwrap();
         let (status, _) = post_json(
             &state,
@@ -785,38 +809,80 @@ mod quote_signing_tests {
     #[test]
     fn canonical_payload_is_stable_and_field_bound() {
         let a = canonical_quote_payload(
-            "h100", "240000000000000", 600, 0, "144000000000000000",
-            "0x1111111111111111111111111111111111111111111111111111111111111111", 4102444800,
+            "h100",
+            "240000000000000",
+            600,
+            0,
+            1,
+            "144000000000000000",
+            "0x1111111111111111111111111111111111111111111111111111111111111111",
+            4102444800,
         );
         assert_eq!(
             a,
-            "gpu-lease-quote|v1|h100|240000000000000|600|0|144000000000000000|0x1111111111111111111111111111111111111111111111111111111111111111|4102444800"
+            "gpu-lease-quote|v2|h100|240000000000000|600|0|1|144000000000000000|0x1111111111111111111111111111111111111111111111111111111111111111|4102444800"
         );
         // Every priced field is bound — mutate any one and the payload changes.
         let b = canonical_quote_payload(
-            "h100", "240000000000001", 600, 0, "144000000000000000",
-            "0x1111111111111111111111111111111111111111111111111111111111111111", 4102444800,
+            "h100",
+            "240000000000001",
+            600,
+            0,
+            1,
+            "144000000000000000",
+            "0x1111111111111111111111111111111111111111111111111111111111111111",
+            4102444800,
         );
         assert_ne!(a, b);
+        // The QUANTITY is priced — count must change the signed payload.
+        let c = canonical_quote_payload(
+            "h100",
+            "240000000000000",
+            600,
+            0,
+            2,
+            "288000000000000000",
+            "0x1111111111111111111111111111111111111111111111111111111111111111",
+            4102444800,
+        );
+        assert_ne!(a, c);
     }
 
     #[test]
     fn sign_then_recover_roundtrips_exactly() {
         let key = k256::ecdsa::SigningKey::from_slice(&[77u8; 32]).unwrap();
         let payload = canonical_quote_payload(
-            "h100", "240000000000000", 600, 0, "144000000000000000",
-            "0x2222222222222222222222222222222222222222222222222222222222222222", 4102444800,
+            "h100",
+            "240000000000000",
+            600,
+            0,
+            1,
+            "144000000000000000",
+            "0x2222222222222222222222222222222222222222222222222222222222222222",
+            4102444800,
         );
         let (rsv, address) = crate::eip191_sign_message(&key, &payload).unwrap();
         // The client-side recovery (same function the API verifies with):
         let recovered = crate::eip191_recover_signer(&payload, &rsv).unwrap();
-        assert_eq!(recovered, address, "recovered address must equal signer address");
+        assert_eq!(
+            recovered, address,
+            "recovered address must equal signer address"
+        );
         // Tamper any field => recovery yields a different address (fail-closed binding)
         let tampered = canonical_quote_payload(
-            "h100", "999999999999999", 600, 0, "144000000000000000",
-            "0x2222222222222222222222222222222222222222222222222222222222222222", 4102444800,
+            "h100",
+            "999999999999999",
+            600,
+            0,
+            1,
+            "144000000000000000",
+            "0x2222222222222222222222222222222222222222222222222222222222222222",
+            4102444800,
         );
         let recovered_tampered = crate::eip191_recover_signer(&tampered, &rsv).unwrap();
-        assert_ne!(recovered_tampered, address, "tampered payload must not verify to the signer");
+        assert_ne!(
+            recovered_tampered, address,
+            "tampered payload must not verify to the signer"
+        );
     }
 }

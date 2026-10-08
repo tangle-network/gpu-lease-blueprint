@@ -35,8 +35,8 @@
       "name": "lease",
       "description": "Create an escrowed GPU lease (allocates a device)",
       "params": {
-        "encodeType": "GpuLeaseRequest(uint8 intentVersion,bytes32 intentHash,uint128 pricePerSecond,uint64 durationSeconds,uint8 confidentiality,string gpuClass,string region,address lessee,bytes32 leaseId,bytes32 sandboxId,uint8 sandboxTeeType)",
-        "typehash": "0x25dc037e4b984a855430d3654f57ab3c744ea28c9afe5ce9819af471d7b8c2ac"
+        "encodeType": "GpuLeaseRequest(uint8 intentVersion,bytes32 intentHash,uint128 pricePerSecond,uint64 durationSeconds,uint8 confidentiality,string gpuClass,string region,address lessee,bytes32 leaseId,bytes32 sandboxId,uint8 sandboxTeeType,uint16 deviceCount)",
+        "typehash": "0xecdad05e60f0b71b050a0cb4c62e3fc3c3602ded092fea22eb0dfc34507b52e8"
       },
       "result": {
         "encodeType": "GpuLeaseOutput(bytes32 leaseId,string endpoint,uint16 schemaVersion)",

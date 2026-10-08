@@ -22,7 +22,7 @@ pub fn teardown(lease_id: [u8; 32], state: u8) -> Result<GpuLeaseAck, String> {
         .map_err(|e| e.to_string())?;
     // Every credential for this lease dies with it — no dangling access.
     let revoked = crate::credentials().revoke_for_lease(lease_id);
-    tracing::debug!(lease = %hex::encode(lease_id), device = %alloc.device_id, revoked, "lease torn down");
+    tracing::debug!(lease = %hex::encode(lease_id), devices = ?alloc.device_ids, revoked, "lease torn down");
     Ok(GpuLeaseAck {
         leaseId: lease_id.into(),
         state,
@@ -44,7 +44,7 @@ mod tests {
             cuda_ordinal: 0,
         }]);
         let lease = [11u8; 32];
-        a.acquire("h100", false, lease, "0xabc", 60).unwrap();
+        a.acquire("h100", false, 1, lease, "0xabc", 60).unwrap();
         lease
     }
 

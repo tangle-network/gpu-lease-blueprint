@@ -22,6 +22,8 @@ pub enum QuoteValidationError {
     },
     #[error("duration {requested}s out of policy bounds [{min},{max}]")]
     DurationOutOfBounds { requested: u64, min: u64, max: u64 },
+    #[error("device count {requested} out of bounds [1,{max}]")]
+    DeviceCountOutOfBounds { requested: u16, max: u16 },
 }
 
 /// The priced intent — the off-chain half of the RFQ quote.
@@ -32,8 +34,15 @@ pub struct QuoteInputs {
     /// 0 = no TEE binding; 1 = TEE required (quote is structurally
     /// unservable by non-TEE operators — #1568).
     pub confidentiality: u8,
+    /// Devices rented under the lease — escrow scales per device.
+    #[serde(default = "one_device")]
+    pub device_count: u16,
     /// Current utilization of the class, in basis points [0, 10000].
     pub utilization_bps: u32,
+}
+
+fn one_device() -> u16 {
+    1
 }
 
 /// The computed quote — the fields the operator signs in the RFQ flow.
@@ -43,6 +52,7 @@ pub struct GpuLeaseQuote {
     pub price_per_second: u128,
     pub duration_seconds: u64,
     pub confidentiality: u8,
+    pub device_count: u16,
     pub escrow_total: u128,
     pub schema_version: u16,
 }
@@ -131,7 +141,8 @@ impl QuotePolicy {
     }
 
     /// Price a quote request: base × class_bps × utilization × tee_premium.
-    /// Pure function — deterministic, unit-pinned.
+    /// Pure function — deterministic, unit-pinned. Escrow is per-device price
+    /// × duration × deviceCount (the vault re-verifies the same product).
     pub fn quote(&self, inputs: &QuoteInputs) -> Result<GpuLeaseQuote, QuoteValidationError> {
         if inputs.duration_seconds < self.min_duration_seconds
             || inputs.duration_seconds > self.max_duration_seconds
@@ -140,6 +151,12 @@ impl QuotePolicy {
                 requested: inputs.duration_seconds,
                 min: self.min_duration_seconds,
                 max: self.max_duration_seconds,
+            });
+        }
+        if inputs.device_count == 0 || inputs.device_count > crate::MAX_DEVICE_COUNT_PER_LEASE {
+            return Err(QuoteValidationError::DeviceCountOutOfBounds {
+                requested: inputs.device_count,
+                max: crate::MAX_DEVICE_COUNT_PER_LEASE,
             });
         }
         let base = self.base_price(&inputs.gpu_class)?;
@@ -167,7 +184,10 @@ impl QuotePolicy {
             price_per_second: price,
             duration_seconds: inputs.duration_seconds,
             confidentiality: inputs.confidentiality,
-            escrow_total: price.saturating_mul(u128::from(inputs.duration_seconds)),
+            device_count: inputs.device_count,
+            escrow_total: price
+                .saturating_mul(u128::from(inputs.duration_seconds))
+                .saturating_mul(u128::from(inputs.device_count)),
             schema_version: crate::SCHEMA_VERSION,
         })
     }
@@ -184,6 +204,7 @@ impl QuotePolicy {
             gpu_class: gpu_class.to_string(),
             duration_seconds: self.min_duration_seconds,
             confidentiality: 1,
+            device_count: 1,
             utilization_bps: 10_000,
         };
         let ceiling = self.quote(&ceiling_inputs)?.price_per_second;
@@ -207,6 +228,7 @@ mod tests {
             gpu_class: class.into(),
             duration_seconds: dur,
             confidentiality: 0,
+            device_count: 1,
             utilization_bps: 0,
         }
     }
@@ -266,10 +288,33 @@ mod tests {
     }
 
     #[test]
-    fn escrow_is_price_times_duration() {
+    fn escrow_is_price_times_duration_times_count() {
         let p = QuotePolicy::default();
         let q = p.quote(&idle("h100", 7200)).unwrap();
         assert_eq!(q.escrow_total, q.price_per_second * 7200);
+        let mut two = idle("h100", 7200);
+        two.device_count = 4;
+        let q4 = p.quote(&two).unwrap();
+        // Per-device price is count-independent; escrow scales exactly.
+        assert_eq!(q4.price_per_second, q.price_per_second);
+        assert_eq!(q4.escrow_total, q.price_per_second * 7200 * 4);
+    }
+
+    #[test]
+    fn device_count_bounds_enforced() {
+        let p = QuotePolicy::default();
+        let mut zero = idle("h100", 3600);
+        zero.device_count = 0;
+        assert!(matches!(
+            p.quote(&zero),
+            Err(QuoteValidationError::DeviceCountOutOfBounds { .. })
+        ));
+        let mut too_many = idle("h100", 3600);
+        too_many.device_count = crate::MAX_DEVICE_COUNT_PER_LEASE + 1;
+        assert!(matches!(
+            p.quote(&too_many),
+            Err(QuoteValidationError::DeviceCountOutOfBounds { .. })
+        ));
     }
 
     #[test]
@@ -280,6 +325,7 @@ mod tests {
                 gpu_class: "h100".into(),
                 duration_seconds: 60,
                 confidentiality: 1,
+                device_count: 1,
                 utilization_bps: 10_000,
             })
             .unwrap()

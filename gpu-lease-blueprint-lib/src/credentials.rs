@@ -343,9 +343,7 @@ pub fn eip191_sign_message(
 }
 
 /// EVM address of a secp256k1 verifying key: keccak(uncompressed pubkey)[12..].
-pub fn verifying_key_address(
-    vk: &k256::ecdsa::VerifyingKey,
-) -> Result<String, CredentialError> {
+pub fn verifying_key_address(vk: &k256::ecdsa::VerifyingKey) -> Result<String, CredentialError> {
     use k256::elliptic_curve::sec1::ToEncodedPoint;
     let point = vk.to_encoded_point(false);
     let mut k = Keccak::v256();

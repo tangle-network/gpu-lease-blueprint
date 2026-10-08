@@ -47,7 +47,7 @@ contract GpuLeaseBlueprint is BlueprintServiceManagerBase, ComputeProviderSlashi
     struct GpuLeaseRequest {
         uint8 intentVersion;
         bytes32 intentHash;
-        uint128 pricePerSecond;
+        uint128 pricePerSecond; // per device
         uint64 durationSeconds;
         uint8 confidentiality;
         string gpuClass;
@@ -56,6 +56,7 @@ contract GpuLeaseBlueprint is BlueprintServiceManagerBase, ComputeProviderSlashi
         bytes32 leaseId; // the vault lease the buyer already escrowed
         bytes32 sandboxId; // composition: the sandbox this GPU attaches to (0 = standalone)
         uint8 sandboxTeeType; // 0=none 1=Nitro 2=TDX 3=SEV — must match GPU TEE when confidentiality=1
+        uint16 deviceCount; // devices rented under this lease (1 = classic single-GPU)
     }
 
     struct GpuLeaseOutput {
@@ -118,6 +119,7 @@ contract GpuLeaseBlueprint is BlueprintServiceManagerBase, ComputeProviderSlashi
     error IntentMismatch(bytes32 inRequest, bytes32 inVault);
     error OperatorMismatch(address expected, address actual);
     error LesseeMismatch(address expected, address actual);
+    error DeviceCountMismatch(uint16 inRequest, uint16 inVault);
     error LeaseAlreadyBound(bytes32 leaseId);
     error VaultLeaseNotLive(bytes32 leaseId, uint8 state);
 
@@ -244,7 +246,7 @@ contract GpuLeaseBlueprint is BlueprintServiceManagerBase, ComputeProviderSlashi
 
         // Vault cross-check: the lease the operator claims must be real,
         // live, and bound to this exact intent + operator + requester (I5).
-        (address vOperator, address vLessee, uint128 vEscrow, uint128 vPrice, uint64 vExpiry, bytes32 vIntent, uint8 vConf, uint8 vState) =
+        (address vOperator, address vLessee, uint128 vEscrow, uint128 vPrice, uint64 vExpiry, bytes32 vIntent, uint8 vConf, uint8 vState, uint16 vDeviceCount) =
             $.vault.leases(output.leaseId);
         // A lease that was never created reads as an empty struct (state 0) —
         // expiry == 0 is impossible for a real lease (durationSeconds >= 1).
@@ -263,6 +265,11 @@ contract GpuLeaseBlueprint is BlueprintServiceManagerBase, ComputeProviderSlashi
         // Price binding: the vault lease price must match the request quote.
         if (vPrice != request.pricePerSecond) {
             revert IntentMismatch(request.intentHash, vIntent);
+        }
+        // Quantity binding: the operator must deliver exactly the paid-for
+        // device count (a 2-GPU lease cannot be served by binding 1 device).
+        if (vDeviceCount != request.deviceCount) {
+            revert DeviceCountMismatch(request.deviceCount, vDeviceCount);
         }
         vEscrow; vExpiry; vConf; // (all cross-checked implicitly via intent binding)
 

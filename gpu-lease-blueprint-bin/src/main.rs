@@ -79,7 +79,7 @@ async fn main() -> Result<(), blueprint_sdk::Error> {
                     gpu_lease_blueprint_lib::credentials().revoke_for_lease(alloc.lease_id);
                 warn!(
                     lease = ?alloc.lease_id,
-                    device = %alloc.device_id,
+                    devices = ?alloc.device_ids,
                     revoked,
                     "reaped expired lease session"
                 );

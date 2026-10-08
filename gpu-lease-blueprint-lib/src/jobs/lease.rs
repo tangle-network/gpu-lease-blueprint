@@ -11,7 +11,7 @@ use blueprint_sdk::tangle::extract::{Caller, TangleArg, TangleResult};
 
 use crate::GpuLeaseOutput;
 use crate::GpuLeaseRequest;
-use crate::allocator::AllocatorError;
+use crate::allocator::{AllocatorError, TeeType};
 use crate::quote::QuoteValidationError;
 
 pub async fn lease(
@@ -43,17 +43,19 @@ pub enum LeaseError {
 }
 
 pub fn allocate(request: &GpuLeaseRequest, caller: &str) -> Result<GpuLeaseOutput, LeaseError> {
-    if request.intentVersion != 1 {
+    if request.intentVersion != crate::INTENT_VERSION {
         return Err(LeaseError::UnknownIntentVersion(request.intentVersion));
     }
     // I5 operator side: the intent the lessee claims must hash to the
-    // intentHash the RFQ quote signed and the vault stores.
+    // intentHash the RFQ quote signed and the vault stores. v2 binds the
+    // device count — the quantity is priced.
     let expected = super::intent_hash(
         request.intentVersion,
         &request.gpuClass,
         request.durationSeconds,
         request.confidentiality,
         &request.region,
+        request.deviceCount,
     );
     let actual: [u8; 32] = request.intentHash.into();
     if expected != actual {
@@ -77,12 +79,17 @@ pub fn allocate(request: &GpuLeaseRequest, caller: &str) -> Result<GpuLeaseOutpu
     }
 
     // The leaseId is the VAULT's (buyer created + escrowed it); the operator
-    // binds the device to that identity. Unknown ids fail in the allocator.
+    // binds the devices to that identity. Unknown ids fail in the allocator.
     let lease_id: [u8; 32] = request.leaseId.into();
 
-    let alloc = crate::allocator().acquire(
+    // TEE composition: a confidential lease bound to a sandbox must land on
+    // GPUs whose TEE type matches the sandbox's (Nitro sandbox → Nitro GPU).
+    let sandbox_tee_type = TeeType::from(request.sandboxTeeType);
+    let alloc = crate::allocator().acquire_with_tee(
         &request.gpuClass,
         request.confidentiality > 0,
+        sandbox_tee_type,
+        request.deviceCount,
         lease_id,
         &lessee,
         request.durationSeconds,
@@ -109,7 +116,7 @@ mod tests {
         request: &GpuLeaseRequest,
         caller: &str,
     ) -> Result<GpuLeaseOutput, LeaseError> {
-        if request.intentVersion != 1 {
+        if request.intentVersion != crate::INTENT_VERSION {
             return Err(LeaseError::UnknownIntentVersion(request.intentVersion));
         }
         let expected = super::super::intent_hash(
@@ -118,6 +125,7 @@ mod tests {
             request.durationSeconds,
             request.confidentiality,
             &request.region,
+            request.deviceCount,
         );
         let actual: [u8; 32] = request.intentHash.into();
         if expected != actual {
@@ -127,9 +135,11 @@ mod tests {
             });
         }
         let lease_id: [u8; 32] = request.leaseId.into();
-        let alloc = a.acquire(
+        let alloc = a.acquire_with_tee(
             &request.gpuClass,
             request.confidentiality > 0,
+            TeeType::from(request.sandboxTeeType),
+            request.deviceCount,
             lease_id,
             caller,
             request.durationSeconds,
@@ -146,8 +156,9 @@ mod tests {
         let region = "us-east".to_string();
         let dur = 3600u64;
         GpuLeaseRequest {
-            intentVersion: 1,
-            intentHash: crate::jobs::intent_hash(1, &class, dur, 0, &region).into(),
+            intentVersion: crate::INTENT_VERSION,
+            intentHash: crate::jobs::intent_hash(crate::INTENT_VERSION, &class, dur, 0, &region, 1)
+                .into(),
             pricePerSecond: 300_000_000_000_000u128,
             durationSeconds: dur,
             confidentiality: 0,
@@ -159,6 +170,7 @@ mod tests {
             leaseId: [7u8; 32].into(),
             sandboxId: [0u8; 32].into(),
             sandboxTeeType: 0,
+            deviceCount: 1,
         }
     }
 
@@ -175,6 +187,7 @@ mod tests {
         assert_eq!(out.schemaVersion, 1);
         let endpoint: serde_json::Value = serde_json::from_str(&out.endpoint).unwrap();
         assert_eq!(endpoint["transport"], "local-attach");
+        assert_eq!(endpoint["devices"].as_array().unwrap().len(), 1);
         assert!(
             !out.endpoint.contains("token"),
             "no credential material in job output"

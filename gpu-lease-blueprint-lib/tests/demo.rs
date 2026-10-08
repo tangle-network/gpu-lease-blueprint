@@ -11,11 +11,11 @@
 //!   5. exec the TS demo (vitest, env-gated) in the SDK worktree
 //!   6. assert the child exited 0
 
+use alloy_rpc_types::TransactionRequest;
 use anyhow::{Context, Result};
 use blueprint_anvil_testing_utils::{BlueprintHarness, missing_tnt_core_artifacts};
 use blueprint_sdk::alloy::primitives::{Address, Bytes, TxKind, U256};
 use blueprint_sdk::alloy::providers::{Provider, ProviderBuilder};
-use alloy_rpc_types::TransactionRequest;
 use gpu_lease_blueprint_lib::api::operator_api_router;
 use gpu_lease_blueprint_lib::router;
 use once_cell::sync::Lazy;
@@ -69,7 +69,12 @@ async fn impersonated_send(
     input: Vec<u8>,
     value: U256,
 ) -> Result<()> {
-    raw(rpc, "anvil_impersonateAccount", serde_json::json!([format!("{from:#x}")])).await?;
+    raw(
+        rpc,
+        "anvil_impersonateAccount",
+        serde_json::json!([format!("{from:#x}")]),
+    )
+    .await?;
     let provider = ProviderBuilder::new().connect(rpc).await?;
     let mut tx = TransactionRequest::default();
     tx.from = Some(from);
@@ -92,8 +97,11 @@ fn demo_sdk_dir() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             // Default: sibling worktree of this machine.
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../agent-dev-container-gpu-lease/products/sandbox/sdk")
-                .into()
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../agent-dev-container-gpu-lease/products/sandbox/sdk"
+            )
+            .into()
         })
 }
 
@@ -275,12 +283,16 @@ async fn derive_address_with_sdk(sdk_dir: &std::path::Path, key: &str) -> Result
         String::from_utf8_lossy(&out.stderr)
     );
     let addr = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    addr.parse().with_context(|| format!("derived address {addr}"))
+    addr.parse()
+        .with_context(|| format!("derived address {addr}"))
 }
 
 mod gpu_lease_demo_abi {
     /// addPermittedCaller(uint64,address) selector + args.
-    pub fn encode_add_permitted_caller(service_id: u64, caller: blueprint_sdk::alloy::primitives::Address) -> Vec<u8> {
+    pub fn encode_add_permitted_caller(
+        service_id: u64,
+        caller: blueprint_sdk::alloy::primitives::Address,
+    ) -> Vec<u8> {
         use tiny_keccak::{Hasher, Keccak};
         let mut k = Keccak::v256();
         k.update(b"addPermittedCaller(uint64,address)");

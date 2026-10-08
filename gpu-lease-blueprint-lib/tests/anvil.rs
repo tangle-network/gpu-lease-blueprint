@@ -57,7 +57,7 @@ fn setup_log() {
 /// (SPEC §4: no on-chain registry; this is operator-local truth).
 /// Operator quote-signing key (test-constant; production feeds the runner keystore).
 const QUOTE_SIGNING_KEY: &str = "4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d";
-const GPU_INVENTORY: &str = r#"[{"id":"gpu-0","gpu_class":"h100","tee":false,"cuda_ordinal":0}]"#;
+const GPU_INVENTORY: &str = r#"[{"id":"gpu-0","gpu_class":"h100","tee":false,"cuda_ordinal":0},{"id":"gpu-1","gpu_class":"h100","tee":false,"cuda_ordinal":1}]"#;
 
 async fn spawn_harness() -> Result<Option<BlueprintHarness>> {
     // The anvil container occasionally dies mid-seed (colima flake) — retry.
@@ -66,7 +66,7 @@ async fn spawn_harness() -> Result<Option<BlueprintHarness>> {
         match BlueprintHarness::builder(router())
             .poll_interval(Duration::from_millis(50))
             .with_env_var("GPU_INVENTORY_JSON", GPU_INVENTORY)
-        .with_env_var("GPU_QUOTE_SIGNING_KEY", QUOTE_SIGNING_KEY)
+            .with_env_var("GPU_QUOTE_SIGNING_KEY", QUOTE_SIGNING_KEY)
             .spawn()
             .await
         {
@@ -225,7 +225,7 @@ fn keccak256(data: &[u8]) -> [u8; 32] {
 sol! {
     #[sol(rpc)]
     interface IGpuLeaseVault {
-        function create(address operator, uint128 pricePerSecond, uint64 durationSeconds, bytes32 intentHash, uint8 confidentiality, bytes endpointInfo) external payable returns (bytes32 leaseId);
+        function create(address operator, uint128 pricePerSecond, uint64 durationSeconds, uint16 deviceCount, bytes32 intentHash, uint8 confidentiality, bytes endpointInfo) external payable returns (bytes32 leaseId);
         function extend(bytes32 leaseId, uint64 addSeconds) external payable;
         function release(bytes32 leaseId) external;
         function reap(bytes32 leaseId) external;
@@ -233,7 +233,7 @@ sol! {
         function totalEscrowed() external view returns (uint256);
         function operatorEarnings() external view returns (uint256);
 
-        event LeaseCreated(bytes32 indexed leaseId, address indexed operator, address indexed lessee, uint128 escrow, uint128 pricePerSecond, uint64 expiry, bytes32 intentHash, uint8 confidentiality, bytes endpointInfo, uint16 schemaVersion);
+        event LeaseCreated(bytes32 indexed leaseId, address indexed operator, address indexed lessee, uint128 escrow, uint128 pricePerSecond, uint16 deviceCount, uint64 expiry, bytes32 intentHash, uint8 confidentiality, bytes endpointInfo, uint16 schemaVersion);
         event LeaseReleased(bytes32 indexed leaseId, uint128 refund, uint128 operatorTake);
         event LeaseReaped(bytes32 indexed leaseId, uint128 operatorTake, address caller);
     }
@@ -611,18 +611,24 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
         let vault = deploy_vault(&chain, deployer).await?;
         eprintln!("vault deployed at {vault:#x}");
 
-        let price: u128 = 1_000; // wei/s
+        let price: u128 = 1_000; // wei/s PER DEVICE
         let duration: u64 = 600; // seconds
-        let cost = U256::from(price) * U256::from(duration);
+        // The primary lease rents BOTH devices — the multi-GPU path is the
+        // E2E's headline, not an edge case.
+        let device_count: u16 = 2;
+        let cost = U256::from(price) * U256::from(duration) * U256::from(device_count);
 
         // ── 1. Buyer escrows on the vault ────────────────────────────────
         let class = "h100".to_string();
         let region = "local".to_string();
-        let intent = jobs::intent_hash(1, &class, duration, 0, &region);
+        let intent =
+            jobs::intent_hash(gpu_lease_blueprint_lib::INTENT_VERSION, &class, duration, 0, &region, device_count);
+        let intent_single = jobs::intent_hash(gpu_lease_blueprint_lib::INTENT_VERSION, &class, duration, 0, &region, 1);
         let create_input = IGpuLeaseVault::createCall {
             operator,
             pricePerSecond: price,
             durationSeconds: duration,
+            deviceCount: device_count,
             intentHash: intent.into(),
             confidentiality: 0,
             endpointInfo: "{}".into(),
@@ -638,7 +644,7 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
 
         // ── 2. LEASE job through real tnt-core, bound to the vault lease ──
         let request = GpuLeaseRequest {
-            intentVersion: 1,
+            intentVersion: gpu_lease_blueprint_lib::INTENT_VERSION,
             intentHash: intent.into(),
             pricePerSecond: price,
             durationSeconds: duration,
@@ -649,6 +655,7 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
             leaseId: lease_id.into(),
             sandboxId: [0u8; 32].into(),
             sandboxTeeType: 0,
+            deviceCount: device_count,
         }
         .abi_encode();
 
@@ -754,6 +761,7 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
                 &expected.to_string(),
                 600,
                 0,
+                1,
                 &(expected * 600).to_string(),
                 quote["intentHash"].as_str().unwrap(),
                 quote["validUntil"].as_u64().unwrap(),
@@ -774,13 +782,16 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
                 None,
             )
             .await?;
-            anyhow::ensure!(status["deviceId"] == "gpu-0", "status device: {status}");
+            anyhow::ensure!(
+                status["deviceIds"] == serde_json::json!(["gpu-0", "gpu-1"]),
+                "status devices: {status}"
+            );
             anyhow::ensure!(status["expiresAt"].as_u64().unwrap() > 0);
             let raw = status.to_string();
             anyhow::ensure!(!raw.contains("token") && !raw.contains("secret"), "credential leak");
             eprintln!(
-                "operator API leg ok: quote {} wei/s, status device={}",
-                quote["pricePerSecond"], status["deviceId"]
+                "operator API leg ok: quote {} wei/s, status devices={}",
+                quote["pricePerSecond"], status["deviceIds"]
             );
         }
 
@@ -789,6 +800,10 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
         anyhow::ensure!(
             endpoint["transport"] == "local-attach",
             "unexpected endpoint transport: {endpoint}"
+        );
+        anyhow::ensure!(
+            endpoint["devices"] == serde_json::json!([0, 1]),
+            "multi-GPU endpoint must carry both ordinals: {endpoint}"
         );
         anyhow::ensure!(lease_output.schemaVersion == 1, "schema version must be 1");
         anyhow::ensure!(
@@ -803,7 +818,7 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
 
         // ── 3. EXTEND: escrow on the vault + job for the session ─────────
         let add_seconds: u64 = 300;
-        let extend_cost = U256::from(price) * U256::from(add_seconds);
+        let extend_cost = U256::from(price) * U256::from(add_seconds) * U256::from(device_count);
         chain
             .send(
                 buyer,
@@ -850,8 +865,9 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
         // (expiry includes the extend: created.expiry + addSeconds.)
         let current_expiry = lease_expiry + add_seconds;
         anyhow::ensure!(current_expiry > now, "release past expiry?");
-        let expected_refund = U256::from(price) * U256::from(current_expiry - now);
-        let total_paid = U256::from(price) * U256::from(duration + add_seconds);
+        let expected_refund = U256::from(price) * U256::from(current_expiry - now) * U256::from(device_count);
+        let total_paid =
+            U256::from(price) * U256::from(duration + add_seconds) * U256::from(device_count);
         anyhow::ensure!(
             U256::from(released.refund) + U256::from(released.operatorTake) == total_paid,
             "I1/I4 violated: refund + take != total paid ({})",
@@ -915,21 +931,22 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
                     operator,
                     pricePerSecond: price,
                     durationSeconds: duration,
-                    intentHash: intent.into(),
+                    deviceCount: 1,
+                    intentHash: intent_single.into(),
                     confidentiality: 0,
                     endpointInfo: "{}".into(),
                 }
                 .abi_encode(),
                 Some(vault),
-                cost,
+                U256::from(price) * U256::from(duration),
             )
             .await?;
         let lease2 = created2.leaseId.0;
 
         // LEASE the second one through tnt-core too.
         let request2 = GpuLeaseRequest {
-            intentVersion: 1,
-            intentHash: intent.into(),
+            intentVersion: gpu_lease_blueprint_lib::INTENT_VERSION,
+            intentHash: intent_single.into(),
             pricePerSecond: price,
             durationSeconds: duration,
             confidentiality: 0,
@@ -939,6 +956,7 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
             leaseId: lease2.into(),
             sandboxId: [0u8; 32].into(),
             sandboxTeeType: 0,
+            deviceCount: 1,
         }
         .abi_encode();
         let sub2 = harness.submit_job(JOB_LEASE, Bytes::from(request2)).await?;
@@ -959,7 +977,7 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
             )
             .await?;
         anyhow::ensure!(
-            U256::from(reaped.operatorTake) == cost,
+            U256::from(reaped.operatorTake) == U256::from(price) * U256::from(duration),
             "reap must pay the full escrow"
         );
         chain.assert_conservation(vault).await?;

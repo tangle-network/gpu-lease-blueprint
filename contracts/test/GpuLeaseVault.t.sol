@@ -33,13 +33,17 @@ contract GpuLeaseVaultTest is Test {
     // ------------------------------------------------------------------
 
     function _create(uint128 price, uint64 duration) internal returns (bytes32 id) {
-        uint256 cost = uint256(price) * uint256(duration);
+        id = _createCount(price, duration, 1);
+    }
+
+    function _createCount(uint128 price, uint64 duration, uint16 count) internal returns (bytes32 id) {
+        uint256 cost = uint256(price) * uint256(duration) * uint256(count);
         vm.prank(lessee);
-        id = vault.create{value: cost}(operator, price, duration, INTENT, 0, ENDPOINT);
+        id = vault.create{value: cost}(operator, price, duration, count, INTENT, 0, ENDPOINT);
     }
 
     function _lease(bytes32 id) internal view returns (GpuLeaseVault.Lease memory l) {
-        (l.operator, l.lessee, l.escrow, l.pricePerSecond, l.expiry, l.intentHash, l.confidentiality, l.state) =
+        (l.operator, l.lessee, l.escrow, l.pricePerSecond, l.expiry, l.intentHash, l.confidentiality, l.state, l.deviceCount) =
             vault.leases(id);
     }
 
@@ -57,13 +61,17 @@ contract GpuLeaseVaultTest is Test {
         GpuLeaseVault.Lease memory l = _lease(id);
         uint256 remaining = l.expiry > block.timestamp ? uint256(l.expiry - block.timestamp) : 0;
         assertLe(
-            uint256(l.pricePerSecond) * remaining,
+            uint256(l.pricePerSecond) * uint256(l.deviceCount) * remaining,
             uint256(l.escrow),
-            "I2 violated: price*remaining > escrow"
+            "I2 violated: price*count*remaining > escrow"
         );
-        // Exact derivation pinned: escrow == price * paidSeconds at all times,
-        // so _settle's division is exact by construction.
-        assertEq(uint256(l.escrow) % uint256(l.pricePerSecond), 0, "derivation broken: escrow % price != 0");
+        // Exact derivation pinned: escrow == price * count * paidSeconds at all
+        // times, so _settle's division is exact by construction.
+        assertEq(
+            uint256(l.escrow) % (uint256(l.pricePerSecond) * uint256(l.deviceCount)),
+            0,
+            "derivation broken: escrow % (price*count) != 0"
+        );
     }
 
     // ==================================================================
@@ -77,7 +85,7 @@ contract GpuLeaseVaultTest is Test {
         bytes32 expectedId = keccak256(abi.encodePacked(operator, lessee, INTENT, block.timestamp, uint256(0), cost));
         vm.expectEmit(true, true, true, true);
         emit GpuLeaseVault.LeaseCreated(
-            expectedId, operator, lessee, PRICE * DURATION, PRICE, before + DURATION, INTENT, 0, ENDPOINT, 1
+            expectedId, operator, lessee, PRICE * DURATION, PRICE, 1, before + DURATION, INTENT, 0, ENDPOINT, 1
         );
         bytes32 id = _create(PRICE, DURATION);
         assertEq(id, expectedId, "deterministic leaseId");
@@ -98,26 +106,26 @@ contract GpuLeaseVaultTest is Test {
     function test_Create_RevertZeroPrice() public {
         vm.prank(lessee);
         vm.expectRevert(GpuLeaseVault.ZeroPrice.selector);
-        vault.create{value: 1}(operator, 0, DURATION, INTENT, 0, ENDPOINT);
+        vault.create{value: 1}(operator, 0, DURATION, 1, INTENT, 0, ENDPOINT);
     }
 
     function test_Create_RevertZeroDuration() public {
         vm.prank(lessee);
         vm.expectRevert(GpuLeaseVault.DurationZero.selector);
-        vault.create{value: PRICE}(operator, PRICE, 0, INTENT, 0, ENDPOINT);
+        vault.create{value: PRICE}(operator, PRICE, 0, 1, INTENT, 0, ENDPOINT);
     }
 
     function test_Create_RevertInsufficientValue() public {
         vm.prank(lessee);
         vm.expectRevert(GpuLeaseVault.InsufficientEscrow.selector);
-        vault.create{value: uint256(PRICE) * DURATION - 1}(operator, PRICE, DURATION, INTENT, 0, ENDPOINT);
+        vault.create{value: uint256(PRICE) * DURATION - 1}(operator, PRICE, DURATION, 1, INTENT, 0, ENDPOINT);
     }
 
     function test_Create_OverpayRefundsExcess_I1HoldsExactly() public {
         uint256 cost = uint256(PRICE) * DURATION;
         uint256 lesseeBefore = lessee.balance;
         vm.startPrank(lessee);
-        bytes32 id = vault.create{value: cost + 7 ether}(operator, PRICE, DURATION, INTENT, 0, ENDPOINT);
+        bytes32 id = vault.create{value: cost + 7 ether}(operator, PRICE, DURATION, 1, INTENT, 0, ENDPOINT);
         vm.stopPrank();
         // Excess returned to the wei; nothing stranded in the vault.
         assertEq(lessee.balance, lesseeBefore - cost, "excess not refunded exactly");
@@ -134,7 +142,7 @@ contract GpuLeaseVaultTest is Test {
         vm.deal(lessee, cost);
         vm.prank(lessee);
         vm.expectRevert(GpuLeaseVault.Overflow.selector);
-        vault.create{value: cost}(operator, hugePrice, duration, INTENT, 0, ENDPOINT);
+        vault.create{value: cost}(operator, hugePrice, duration, 1, INTENT, 0, ENDPOINT);
     }
 
     function test_Create_RevertExpiryOverflowsUint64() public {
@@ -143,7 +151,7 @@ contract GpuLeaseVaultTest is Test {
         vm.deal(lessee, cost);
         vm.prank(lessee);
         vm.expectRevert(GpuLeaseVault.Overflow.selector);
-        vault.create{value: cost}(operator, 1, duration, INTENT, 0, ENDPOINT);
+        vault.create{value: cost}(operator, 1, duration, 1, INTENT, 0, ENDPOINT);
     }
 
     // ==================================================================
@@ -476,7 +484,7 @@ contract GpuLeaseVaultTest is Test {
         uint256 cost = uint256(price) * uint256(duration);
         vm.deal(lessee, cost * 2);
         vm.prank(lessee);
-        bytes32 id = vault.create{value: cost}(operator, price, duration, INTENT, 0, ENDPOINT);
+        bytes32 id = vault.create{value: cost}(operator, price, duration, 1, INTENT, 0, ENDPOINT);
         vm.warp(block.timestamp + warp);
 
         uint256 lesseeBefore = lessee.balance;
@@ -501,7 +509,7 @@ contract GpuLeaseVaultTest is Test {
         uint256 cost = uint256(price) * uint256(duration);
         vm.deal(lessee, (cost + uint256(price) * uint256(extend1)) * 2);
         vm.prank(lessee);
-        bytes32 id = vault.create{value: cost}(operator, price, duration, INTENT, 0, ENDPOINT);
+        bytes32 id = vault.create{value: cost}(operator, price, duration, 1, INTENT, 0, ENDPOINT);
         vm.warp(block.timestamp + warp);
         _checkOverstayImpossible(id); // mid-flight, arbitrary time
 
@@ -537,7 +545,7 @@ contract GpuLeaseVaultTest is Test {
 
         // create (with overpay to prove refund path)
         vm.startPrank(lessee);
-        bytes32 id = vault.create{value: totalPaid + 1 ether}(operator, price, duration, INTENT, 0, ENDPOINT);
+        bytes32 id = vault.create{value: totalPaid + 1 ether}(operator, price, duration, 1, INTENT, 0, ENDPOINT);
         vm.stopPrank();
         _checkConservation();
 
@@ -611,7 +619,7 @@ contract GpuLeaseVaultTest is Test {
             uint64 dur = uint64(bound(uint256(keccak256(abi.encode(seed, i, "d"))), 1, 1000));
             uint256 cost = uint256(price) * uint256(dur);
             vm.prank(lessee);
-            ids[i] = vault.create{value: cost}(operator, price, dur, INTENT, 0, ENDPOINT);
+            ids[i] = vault.create{value: cost}(operator, price, dur, 1, INTENT, 0, ENDPOINT);
             expectedEscrowSum += cost;
             _checkConservation();
         }
@@ -638,6 +646,80 @@ contract GpuLeaseVaultTest is Test {
         vm.prank(operator);
         vault.withdrawEarnings();
         assertEq(address(vault).balance, 0, "vault empty after full settle+withdraw");
+        _checkConservation();
+    }
+
+    // ==================================================================
+    // MULTI-GPU (deviceCount > 1) — the priced quantity (I5-immutable)
+    // ==================================================================
+
+    function test_Create_MultiDevice_EscrowsPerDevice() public {
+        uint16 count = 4;
+        uint256 cost = uint256(PRICE) * DURATION * count;
+        vm.prank(lessee);
+        vm.deal(lessee, 1_000_000 ether);
+        bytes32 id = vault.create{value: cost}(operator, PRICE, DURATION, count, INTENT, 0, ENDPOINT);
+        GpuLeaseVault.Lease memory l = _lease(id);
+        assertEq(l.deviceCount, count, "deviceCount stored");
+        assertEq(l.escrow, PRICE * DURATION * count, "escrow = price * duration * count");
+        assertEq(vault.totalEscrowed(), cost, "totalEscrowed");
+        _checkConservation();
+        _checkOverstayImpossible(id);
+    }
+
+    function test_Create_MultiDevice_RevertZeroAndTooHighCount() public {
+        vm.prank(lessee);
+        vm.expectRevert(GpuLeaseVault.DeviceCountZero.selector);
+        vault.create{value: uint256(PRICE) * DURATION}(operator, PRICE, DURATION, 0, INTENT, 0, ENDPOINT);
+
+        vm.prank(lessee);
+        vm.expectRevert(abi.encodeWithSelector(GpuLeaseVault.DeviceCountTooHigh.selector, 65, 64));
+        vault.create{value: 1 ether}(operator, PRICE, DURATION, 65, INTENT, 0, ENDPOINT);
+    }
+
+    function test_Create_MultiDevice_RevertInsufficientEscrow() public {
+        // Paying for one device when renting two must fail closed.
+        vm.prank(lessee);
+        vm.expectRevert(GpuLeaseVault.InsufficientEscrow.selector);
+        vault.create{value: uint256(PRICE) * DURATION}(operator, PRICE, DURATION, 2, INTENT, 0, ENDPOINT);
+    }
+
+    function test_Extend_MultiDevice_CostsPerDevice() public {
+        bytes32 id = _createCount(PRICE, DURATION, 2);
+        // One-device payment for a two-device lease must fail.
+        vm.prank(lessee);
+        vm.expectRevert(GpuLeaseVault.InsufficientEscrow.selector);
+        vault.extend{value: uint256(PRICE) * 10}(id, 10);
+        // Exact per-device payment extends.
+        vm.prank(lessee);
+        vault.extend{value: uint256(PRICE) * 10 * 2}(id, 10);
+        GpuLeaseVault.Lease memory l = _lease(id);
+        assertEq(l.escrow, PRICE * (DURATION + 10) * 2, "escrow grows per device");
+        _checkConservation();
+        _checkOverstayImpossible(id);
+    }
+
+    function test_Release_MultiDevice_ExactProRataPerDevice() public {
+        bytes32 id = _createCount(PRICE, DURATION, 3);
+        vm.warp(block.timestamp + 50);
+        uint256 remaining = DURATION - 50;
+        uint256 expectedRefund = uint256(PRICE) * remaining * 3;
+        uint256 expectedTake = uint256(PRICE) * DURATION * 3 - expectedRefund;
+        uint256 before = lessee.balance;
+        vm.prank(lessee);
+        vm.expectEmit(true, true, true, true);
+        emit GpuLeaseVault.LeaseReleased(id, uint128(expectedRefund), uint128(expectedTake));
+        vault.release(id);
+        assertEq(lessee.balance - before, expectedRefund, "per-device refund exact");
+        _checkConservation();
+    }
+
+    function test_Reap_MultiDevice_FullEscrowToOperator() public {
+        bytes32 id = _createCount(PRICE, DURATION, 2);
+        vm.warp(block.timestamp + DURATION + 1);
+        vm.prank(operator);
+        vault.reap(id);
+        assertEq(vault.operatorEarningsOf(operator), uint256(PRICE) * DURATION * 2, "full multi escrow");
         _checkConservation();
     }
 }

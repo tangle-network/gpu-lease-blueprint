@@ -19,7 +19,10 @@ use blueprint_sdk::alloy::sol;
 use blueprint_sdk::tangle::TangleLayer;
 
 pub use allocator::{Allocation, AllocatorError, GpuAllocator};
-pub use credentials::{CredentialError, CredentialSessions, ScopedCredential, eip191_recover_signer, eip191_sign_message, verifying_key_address};
+pub use credentials::{
+    CredentialError, CredentialSessions, ScopedCredential, eip191_recover_signer,
+    eip191_sign_message, verifying_key_address,
+};
 pub use quote::{QuoteInputs, QuotePolicy, QuoteValidationError};
 
 /// Job IDs — MUST match the sequential indices in the blueprint registration
@@ -31,6 +34,14 @@ pub const JOB_REAP: u8 = 3;
 
 /// On-chain result schema version (SPEC §3: every result carries schemaVersion).
 pub const SCHEMA_VERSION: u16 = 1;
+
+/// Intent schema version. v2 binds `deviceCount` into the canonical intent
+/// (v1 priced one device implicitly); unknown versions fail closed (SPEC §3).
+pub const INTENT_VERSION: u8 = 2;
+
+/// Maximum devices a single lease may rent — mirrors the platform's
+/// accelerator cap (the vault allows headroom above this).
+pub const MAX_DEVICE_COUNT_PER_LEASE: u16 = 16;
 
 sol! {
     /// LEASE job input. Mirrors the RFQ quote's bound fields (SPEC §1 Quoting):
@@ -56,6 +67,9 @@ sol! {
         /// The sandbox's TEE type when confidentiality=1 (composition).
         /// 0=none, 1=Nitro, 2=TDX, 3=SEV — must match the GPU's TEE.
         uint8 sandboxTeeType;
+        /// Devices rented under this lease — the vault escrows
+        /// price × duration × deviceCount and settles per-device pro-rata.
+        uint16 deviceCount;
     }
 
     /// LEASE job output — PUBLIC DATA ONLY (SPEC §2 Credentials).

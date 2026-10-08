@@ -56,7 +56,8 @@ contract GpuLeaseBlueprintTest is Test {
             lessee: lessee,
             leaseId: vaultLeaseId,
             sandboxId: bytes32(0),
-            sandboxTeeType: 0
+            sandboxTeeType: 0,
+            deviceCount: 1
         });
         return abi.encode(request);
     }
@@ -68,7 +69,7 @@ contract GpuLeaseBlueprintTest is Test {
         vm.deal(lessee, 1 ether);
         vm.prank(lessee);
         leaseId = vault.create{value: uint256(PRICE) * DURATION}(
-            operator, PRICE, DURATION, intentHash, 0, "{\"v\":1,\"transport\":\"local-attach\"}"
+            operator, PRICE, DURATION, 1, intentHash, 0, "{\"v\":1,\"transport\":\"local-attach\"}"
         );
 
         // 2. tnt-core relays the job call (caches inputs, bound to the vault leaseId).
@@ -110,7 +111,7 @@ contract GpuLeaseBlueprintTest is Test {
         // Vault lease created with a DIFFERENT intent than the job request carries.
         bytes32 otherIntent = keccak256("gpu-lease-intent|v1|b200|100|0|eu-west");
         leaseId = vault.create{value: uint256(PRICE) * DURATION}(
-            operator, PRICE, DURATION, otherIntent, 0, "{}"
+            operator, PRICE, DURATION, 1, otherIntent, 0, "{}"
         );
         bytes memory leaseRequest = _request(leaseId);
         vm.prank(tangleCore);
@@ -125,7 +126,7 @@ contract GpuLeaseBlueprintTest is Test {
     function test_LeaseJob_RevertWhenOperatorMismatch() public {
         vm.deal(lessee, 1 ether);
         vm.prank(lessee);
-        leaseId = vault.create{value: uint256(PRICE) * DURATION}(operator, PRICE, DURATION, intentHash, 0, "{}");
+        leaseId = vault.create{value: uint256(PRICE) * DURATION}(operator, PRICE, DURATION, 1, intentHash, 0, "{}");
         bytes memory leaseRequest = _request(leaseId);
         vm.prank(tangleCore);
         bsm.onJobCall(serviceId, jobLease, 1, leaseRequest);
@@ -140,7 +141,7 @@ contract GpuLeaseBlueprintTest is Test {
     function test_LeaseJob_RevertWhenLesseeMismatch() public {
         vm.deal(lessee, 1 ether);
         vm.prank(lessee);
-        leaseId = vault.create{value: uint256(PRICE) * DURATION}(operator, PRICE, DURATION, intentHash, 0, "{}");
+        leaseId = vault.create{value: uint256(PRICE) * DURATION}(operator, PRICE, DURATION, 1, intentHash, 0, "{}");
         bytes memory leaseRequest = _request(leaseId);
         // Request claims a different lessee.
         GpuLeaseBlueprint.GpuLeaseRequest memory tampered = abi.decode(leaseRequest, (GpuLeaseBlueprint.GpuLeaseRequest));
@@ -159,7 +160,7 @@ contract GpuLeaseBlueprintTest is Test {
     function test_LeaseJob_RevertWhenUnknownSchemaVersion() public {
         vm.deal(lessee, 1 ether);
         vm.prank(lessee);
-        leaseId = vault.create{value: uint256(PRICE) * DURATION}(operator, PRICE, DURATION, intentHash, 0, "{}");
+        leaseId = vault.create{value: uint256(PRICE) * DURATION}(operator, PRICE, DURATION, 1, intentHash, 0, "{}");
         bytes memory leaseRequest = _request(leaseId);
         vm.prank(tangleCore);
         bsm.onJobCall(serviceId, jobLease, 1, leaseRequest);
@@ -245,12 +246,55 @@ contract GpuLeaseBlueprintTest is Test {
     function _createAndBindLease() internal {
         vm.deal(lessee, 1 ether);
         vm.prank(lessee);
-        leaseId = vault.create{value: uint256(PRICE) * DURATION}(operator, PRICE, DURATION, intentHash, 0, "{}");
+        leaseId = vault.create{value: uint256(PRICE) * DURATION}(operator, PRICE, DURATION, 1, intentHash, 0, "{}");
         bytes memory leaseRequest = _request(leaseId);
         vm.prank(tangleCore);
         bsm.onJobCall(serviceId, jobLease, 1, leaseRequest);
         GpuLeaseBlueprint.GpuLeaseOutput memory output = GpuLeaseBlueprint.GpuLeaseOutput(leaseId, "{}", 1);
         vm.prank(tangleCore);
         bsm.onJobResult(serviceId, jobLease, 1, operator, keccak256(_request(leaseId)), abi.encode(output));
+    }
+
+    /// Quantity binding: the vault lease paid for 2 devices but the job
+    /// request claims 1 — the operator would under-deliver. Fail closed.
+    function test_LeaseJob_RevertWhenDeviceCountMismatch() public {
+        vm.deal(lessee, 1 ether);
+        vm.prank(lessee);
+        bytes32 twoDeviceLease = vault.create{value: uint256(PRICE) * DURATION * 2}(
+            operator, PRICE, DURATION, 2, intentHash, 0, "{}"
+        );
+        bytes memory leaseRequest = _request(twoDeviceLease); // deviceCount: 1
+        vm.prank(tangleCore);
+        bsm.onJobCall(serviceId, jobLease, 1, leaseRequest);
+        GpuLeaseBlueprint.GpuLeaseOutput memory output =
+            GpuLeaseBlueprint.GpuLeaseOutput(twoDeviceLease, "{}", 1);
+        vm.prank(tangleCore);
+        vm.expectRevert(
+            abi.encodeWithSelector(GpuLeaseBlueprint.DeviceCountMismatch.selector, 1, 2)
+        );
+        bsm.onJobResult(
+            serviceId, jobLease, 1, operator, keccak256(_request(twoDeviceLease)), abi.encode(output)
+        );
+    }
+
+    /// The multi-GPU happy path: a 2-device vault lease binds when the job
+    /// request carries the same count.
+    function test_LeaseJob_MultiDevice_BindsMatchingCount() public {
+        vm.deal(lessee, 2 ether);
+        vm.prank(lessee);
+        bytes32 id = vault.create{value: uint256(PRICE) * DURATION * 2}(
+            operator, PRICE, DURATION, 2, intentHash, 0, "{}"
+        );
+        GpuLeaseBlueprint.GpuLeaseRequest memory request = abi.decode(
+            _request(id), (GpuLeaseBlueprint.GpuLeaseRequest)
+        );
+        request.deviceCount = 2;
+        bytes memory leaseRequest = abi.encode(request);
+        vm.prank(tangleCore);
+        bsm.onJobCall(serviceId, jobLease, 1, leaseRequest);
+        GpuLeaseBlueprint.GpuLeaseOutput memory output = GpuLeaseBlueprint.GpuLeaseOutput(id, "{}", 1);
+        vm.prank(tangleCore);
+        bsm.onJobResult(serviceId, jobLease, 1, operator, keccak256(leaseRequest), abi.encode(output));
+        assertEq(bsm.leaseOperatorOf(id), operator, "2-device lease bound");
     }
 }

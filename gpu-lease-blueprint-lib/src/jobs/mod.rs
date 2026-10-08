@@ -20,16 +20,18 @@ pub(crate) fn caller_hex(bytes: &[u8; 20]) -> String {
 /// Canonical intent encoding — the preimage of `intentHash` (SPEC §1 I5).
 /// Versioned and deterministic: field order and separators are part of the
 /// schema. `intentVersion` bumps whenever the field set changes; unknown
-/// versions must fail closed (SPEC §3).
+/// versions must fail closed (SPEC §3). v2 binds `device_count` — the
+/// quantity is priced, so it is part of the intent the quote signs.
 pub fn canonical_intent(
     intent_version: u8,
     gpu_class: &str,
     duration_seconds: u64,
     confidentiality: u8,
     region: &str,
+    device_count: u16,
 ) -> String {
     format!(
-        "gpu-lease-intent|v{intent_version}|{gpu_class}|{duration_seconds}|{confidentiality}|{region}"
+        "gpu-lease-intent|v{intent_version}|{gpu_class}|{duration_seconds}|{confidentiality}|{region}|{device_count}"
     )
 }
 
@@ -41,11 +43,12 @@ pub fn canonical_intent_with_sandbox(
     duration_seconds: u64,
     confidentiality: u8,
     region: &str,
+    device_count: u16,
     sandbox_id: &str,
     sandbox_tee_type: u8,
 ) -> String {
     format!(
-        "gpu-lease-intent|v{intent_version}|{gpu_class}|{duration_seconds}|{confidentiality}|{region}|{sandbox_id}|{sandbox_tee_type}"
+        "gpu-lease-intent|v{intent_version}|{gpu_class}|{duration_seconds}|{confidentiality}|{region}|{device_count}|{sandbox_id}|{sandbox_tee_type}"
     )
 }
 
@@ -57,6 +60,7 @@ pub fn intent_hash(
     duration_seconds: u64,
     confidentiality: u8,
     region: &str,
+    device_count: u16,
 ) -> [u8; 32] {
     use tiny_keccak::{Hasher, Keccak};
     let mut k = Keccak::v256();
@@ -67,6 +71,7 @@ pub fn intent_hash(
             duration_seconds,
             confidentiality,
             region,
+            device_count,
         )
         .as_bytes(),
     );
@@ -94,14 +99,16 @@ mod tests {
 
     #[test]
     fn intent_hash_deterministic_and_field_sensitive() {
-        let a = intent_hash(1, "h100", 3600, 0, "us-east");
-        let b = intent_hash(1, "h100", 3600, 0, "us-east");
+        let a = intent_hash(2, "h100", 3600, 0, "us-east", 1);
+        let b = intent_hash(2, "h100", 3600, 0, "us-east", 1);
         assert_eq!(a, b, "deterministic");
         // Every field is bound — mutation anywhere changes the hash (I5).
-        assert_ne!(a, intent_hash(2, "h100", 3600, 0, "us-east"));
-        assert_ne!(a, intent_hash(1, "b200", 3600, 0, "us-east"));
-        assert_ne!(a, intent_hash(1, "h100", 3601, 0, "us-east"));
-        assert_ne!(a, intent_hash(1, "h100", 3600, 1, "us-east"));
-        assert_ne!(a, intent_hash(1, "h100", 3600, 0, "eu-west"));
+        assert_ne!(a, intent_hash(1, "h100", 3600, 0, "us-east", 1));
+        assert_ne!(a, intent_hash(2, "b200", 3600, 0, "us-east", 1));
+        assert_ne!(a, intent_hash(2, "h100", 3601, 0, "us-east", 1));
+        assert_ne!(a, intent_hash(2, "h100", 3600, 1, "us-east", 1));
+        assert_ne!(a, intent_hash(2, "h100", 3600, 0, "eu-west", 1));
+        // The quantity is priced — count is part of the intent (I5).
+        assert_ne!(a, intent_hash(2, "h100", 3600, 0, "us-east", 2));
     }
 }

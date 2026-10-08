@@ -14,15 +14,18 @@ updates — any needed semantic change is already represented as data.
 - `REAP(bytes32 leaseId)` (anyone, after expiry; releases escrow to operator minus slashing)
 
 **Lease object** (the money-bearing state; parking-meter economics):
-- `{id, operator, lessee, escrowAmount, pricePerSecond, expiry, intentHash, confidentiality, state}`
-- Invariant: `escrow(lessee) ≥ pricePerSecond × remaining(lease)` at all times. EXTEND enforces;
-  RELEASE refunds pro-rata atomically; REAP pays operator for elapsed time. No streaming, no debt,
-  no deadbeat risk, no gas-per-block accounting. Complete money semantics: pay/extend/refund/slash.
+- `{id, operator, lessee, escrowAmount, pricePerSecond, expiry, intentHash, confidentiality, state,
+deviceCount}`
+- Invariant: `escrow(lessee) ≥ pricePerSecond × deviceCount × remaining(lease)` at all times. EXTEND
+  enforces; RELEASE refunds pro-rata atomically; REAP pays operator for elapsed time. No streaming,
+  no debt, no deadbeat risk, no gas-per-block accounting. Complete money semantics:
+  pay/extend/refund/slash. `deviceCount` (intent v2) is I5-immutable: a lease rents N devices of
+  one class, escrow = price × duration × N, refunds and takes scale per device.
 
 **Quoting**: existing `JobsRFQ` unchanged. The signed quote binds `requester + inputsHash +
-confidentiality + price`. Price is per-second; escrow = quote price × requested duration (duration
-is in the hashed inputs). A non-TEE operator structurally cannot serve a TEE-bound quote (proven:
-blueprint #1568).
+confidentiality + price + deviceCount`. Price is per-second PER DEVICE; escrow = quote price ×
+requested duration × deviceCount (both are in the hashed inputs). A non-TEE operator structurally
+cannot serve a TEE-bound quote (proven: blueprint #1568).
 
 **Slashing hook**: a LEASE that expires unfulfilled (operator never returned a leaseId) or a
 RELEASE-attested violation slashes via the existing operator staking. This is the only inventory
