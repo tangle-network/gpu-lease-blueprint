@@ -194,8 +194,8 @@ async fn paid_lease_survives_operator_restart() -> Result<()> {
     );
     ensure!(second["deviceIds"] == json!(["gpu-a", "gpu-b"]));
     ensure!(
-        second["endpoint"].as_str().context("endpoint")?
-            == r#"{"devices":[2,0],"transport":"local-attach","v":1}"#
+        serde_json::from_str::<Value>(second["endpoint"].as_str().context("endpoint")?)?
+            == json!({"devices":[2,0],"transport":"local-attach","v":1})
     );
     ensure!(second["expiresAt"] == created.expiry);
     println!(
@@ -207,6 +207,21 @@ async fn paid_lease_survives_operator_restart() -> Result<()> {
 }
 
 async fn run_operator(command: &mut Command, phase: &str, inventory: &str) -> Result<Value> {
+    let mut probe;
+    let command = if let Some(binary) =
+        std::env::var_os(format!("GPU_LEASE_{}_PROBE", phase.to_uppercase()))
+    {
+        probe = Command::new(binary);
+        probe.args(command.get_args());
+        for (key, value) in command.get_envs() {
+            if let Some(value) = value {
+                probe.env(key, value);
+            }
+        }
+        &mut probe
+    } else {
+        command
+    };
     let mut process = Process(
         command
             .env("PERSISTENCE_PHASE", phase)

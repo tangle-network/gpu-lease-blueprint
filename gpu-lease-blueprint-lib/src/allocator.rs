@@ -138,9 +138,10 @@ impl GpuAllocator {
                         .iter()
                         .filter_map(|id| allocator.devices.iter().find(|d| d.id == *id))
                         .collect();
-                    let endpoint=serde_json::json!({"v":1,"transport":"local-attach","devices":selected.iter().map(|d|d.cuda_ordinal).collect::<Vec<_>>()}).to_string();
+                    let endpoint = serde_json::json!({"v":1,"transport":"local-attach","devices":selected.iter().map(|d|d.cuda_ordinal).collect::<Vec<_>>()});
                     if a.device_ids.is_empty()
-                        || endpoint != a.endpoint_v1
+                        || serde_json::from_str::<serde_json::Value>(&a.endpoint_v1).ok()
+                            != Some(endpoint)
                         || selected.iter().any(|d| {
                             d.gpu_class != a.gpu_class
                                 || (a.tee_required

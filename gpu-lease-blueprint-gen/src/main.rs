@@ -1,19 +1,6 @@
-//! Canonical blueprint metadata generator — THE single source of truth flow.
-//!
-//! The Rust `sol!` types in `gpu-lease-blueprint-lib` are the wire format the
-//! operator actually encodes and decodes. This generator derives the canonical
-//! metadata JSON from THOSE TYPES via their EIP-712 `encode_type` — the field
-//! lists and types are extracted from the compiled macro output, not parsed
-//! from source or hand-maintained. Drift is structurally impossible: change a
-//! `sol!` field and the JSON (and its typehash) changes with it.
-//!
-//! Output: `metadata/blueprint.json` + the keccak256 hash printed on stdout.
-//! The register script embeds this JSON as the on-chain `metadataUri` (data
-//! URI) and pins `metadataHash` — the TangleDriver then reads the definition
-//! from chain, fetches the URI, verifies the hash. No protocol changes; the
-//! fields used all exist in tnt-core 0.19.
-//!
-//! Run: `cargo run -p gpu-lease-blueprint-gen`
+//! Generate metadata/blueprint.json from the operator's Solidity wire types.
+//! Registration publishes its data URI and keccak256 digest.
+//! Run: cargo run -p gpu-lease-blueprint-gen
 
 use blueprint_sdk::alloy::sol_types::SolStruct;
 use gpu_lease_blueprint_lib::{
@@ -33,8 +20,6 @@ fn type_info<T: SolStruct>() -> serde_json::Value {
     let encode_type = T::eip712_encode_type().into_owned();
     let typehash = keccak256(encode_type.as_bytes());
     serde_json::json!({
-        // EIP-712 canonical encode-type, e.g.
-        // "GpuLeaseRequest(uint8 intentVersion,bytes32 intentHash,...)"
         "encodeType": encode_type,
         "typehash": format!("0x{}", hex::encode(typehash)),
     })
@@ -59,19 +44,15 @@ fn job(
 
 fn build_document() -> serde_json::Value {
     serde_json::json!({
-        // Unknown schemaVersion => readers fail closed (SPEC §3).
         "schemaVersion": 1,
         "blueprint": {
             "id": "gpu-lease-blueprint",
             "name": "GPU Lease Blueprint",
-            // Convention the TangleDriver keys on (no side registry):
             "category": "Compute",
             "description": "Escrowed GPU leases: parking-meter economics, RFQ pricing, TEE-bound quotes",
             "codeRepository": "https://github.com/tangle-network/gpu-lease-blueprint",
             "license": "MIT OR Apache-2.0",
         },
-        // The compute resource this blueprint meters. Generic vocabulary —
-        // a TPU/storage/inference blueprint fills the same shape.
         "resource": {
             "kind": "gpu",
             "unit": "second",
