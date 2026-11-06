@@ -7,7 +7,7 @@ description.workspace = true
 license.workspace = true
 
 [dependencies]
-blueprint-sdk = { version = "=0.2.0-alpha.21", default-features = false, features = ["std", "tracing", "macros", "tangle", "local-store", "tee"] }
+blueprint-sdk = { workspace = true, features = ["std", "tracing", "macros", "tangle", "local-store", "tee"] }
 hex = "0.4"
 fs2 = "0.4"
 futures-util = { version = "0.3", features = ["sink"] }

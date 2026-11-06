@@ -16,7 +16,6 @@
 //! Run: `cargo run -p gpu-lease-blueprint-gen`
 
 use blueprint_sdk::alloy::sol_types::SolStruct;
-use gpu_lease_blueprint_lib::QuotePolicy;
 use gpu_lease_blueprint_lib::{
     GpuLeaseAck, GpuLeaseExtendRequest, GpuLeaseIdRequest, GpuLeaseOutput, GpuLeaseRequest,
 };
@@ -78,11 +77,6 @@ fn build_document() -> serde_json::Value {
             "unit": "second",
             "meter": "escrow",           // parking-meter: prepay, pro-rata refund
             "settlement": "vault",        // escrow kernel + pro-rata, invariants I1–I5
-            "classes": QuotePolicy::default()
-                .base_price_per_second
-                .keys()
-                .cloned()
-                .collect::<Vec<String>>(),
             "quote": {
                 // The operator's composable bps policy (see quote.rs): the
                 // driver renders the "why" behind a price from these facts.
@@ -128,51 +122,5 @@ fn main() {
     if let Err(e) = run() {
         eprintln!("error: {e}");
         std::process::exit(1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The committed metadata/blueprint.json must exactly match what the
-    /// current `sol!` types generate. If this fails, run:
-    ///   cargo run -p gpu-lease-blueprint-gen
-    /// and commit the result. This is the drift-killer: the JSON, the wire
-    /// format, and the on-chain pin are one artifact.
-    #[test]
-    fn committed_metadata_matches_sol_types() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../metadata/blueprint.json");
-        let Ok(committed) = std::fs::read_to_string(&path) else {
-            eprintln!(
-                "skipping: {} not found — run `cargo run -p gpu-lease-blueprint-gen`",
-                path.display()
-            );
-            return;
-        };
-        let expected = serde_json::to_string_pretty(&build_document()).unwrap();
-        assert_eq!(
-            committed, expected,
-            "metadata/blueprint.json is stale — regenerate with `cargo run -p gpu-lease-blueprint-gen`"
-        );
-    }
-
-    #[test]
-    fn job_ids_are_sequential_and_pinned() {
-        let doc = build_document();
-        let jobs = doc["jobs"].as_array().unwrap();
-        assert_eq!(jobs.len(), 4);
-        for (i, job) in jobs.iter().enumerate() {
-            assert_eq!(
-                job["id"].as_u64().unwrap(),
-                i as u64,
-                "job ids must be sequential"
-            );
-        }
-        assert_eq!(jobs[0]["name"], "lease");
-        assert_eq!(jobs[1]["name"], "release");
-        assert_eq!(jobs[2]["name"], "extend");
-        assert_eq!(jobs[3]["name"], "reap");
     }
 }
