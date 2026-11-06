@@ -21,7 +21,7 @@ Designed so the only future churn is dependency updates.
 | **Canonical metadata gen** | **DONE** — `cargo run -p gpu-lease-blueprint-gen` derives `metadata/blueprint.json` from the live `sol!` types (EIP-712 encode-type — drift impossible); staleness test in `cargo test` | gen crate, 2 tests |
 | **Driver round-trip on live chain** | **DONE** — our definition registered with data-URI + keccak pin, read back via existing 0.19 views, pin + payload verified | `run-e2e.sh` output: `driver round-trip ok` |
 | **tnt-core E2E on local anvil** | **DONE — full money+job lifecycle**: vault deployed from forge artifacts on the seeded chain; escrow → LEASE → EXTEND → exact-refund RELEASE → withdraw → permissionless REAP; I1 asserted on-chain after every step; ONE leaseId across money and routing | `./scripts/run-e2e.sh` → green (~3s) |
-| SDK `gpuLease` resolver | **NOT STARTED** — lives in sandbox-sdk repo | SPEC §5 |
+| SDK `gpuLease` resolver | Implemented in the [Sandbox SDK](https://github.com/tangle-network/agent-container/tree/develop/products/sandbox/sdk/src/gpu-lease); current ABI/auth changes are under review in [#17186](https://github.com/tangle-network/agent-container/pull/17186) | Full client/operator/chain proof remains pending |
 | External audit | **NOT STARTED** — before mainnet money, non-negotiable | SPEC §6.4 |
 
 ## Layout

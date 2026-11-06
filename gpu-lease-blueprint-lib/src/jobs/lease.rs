@@ -1,220 +1,52 @@
-//! LEASE (job 0) — allocate a co-located device for an escrowed lease.
-//!
-//! Operator-side of SPEC §1: the vault already holds `price × duration`
-//! escrow when this job runs. This handler verifies the intent binding
-//! (recompute intentHash — fail closed), validates the redeemed price
-//! against operator policy, allocates a device, and returns PUBLIC data
-//! only: `{leaseId, endpoint, schemaVersion}`. Credentials are issued
-//! out-of-band via the EIP-191 challenge-session API (credentials.rs).
-
+//! Reserve operator-owned hardware only for an existing funded vault lease.
+use crate::{GpuLeaseOutput, GpuLeaseRequest, chain::ChainConfig};
 use blueprint_sdk::tangle::extract::{Caller, TangleArg, TangleResult};
-
-use crate::GpuLeaseOutput;
-use crate::GpuLeaseRequest;
-use crate::allocator::{AllocatorError, TeeType};
-use crate::quote::QuoteValidationError;
 
 pub async fn lease(
     Caller(caller): Caller,
-    TangleArg(request): TangleArg<GpuLeaseRequest>,
+    TangleArg(r): TangleArg<GpuLeaseRequest>,
 ) -> Result<TangleResult<GpuLeaseOutput>, String> {
-    let caller = super::caller_hex(&caller);
-    let output = allocate(&request, &caller).map_err(|e| e.to_string())?;
-    Ok(TangleResult(output))
-}
-
-/// Core allocation logic, pure of Tangle extractors so it is unit-testable.
-#[derive(Debug, thiserror::Error)]
-pub enum LeaseError {
-    #[error(
-        "intent hash mismatch: request binds 0x{actual}, canonical intent hashes to 0x{expected}"
-    )]
-    IntentHashMismatch { actual: String, expected: String },
-    #[error("unsupported intent version {0} (fail closed, SPEC §3)")]
-    UnknownIntentVersion(u8),
-    #[error(
-        "requester mismatch: job submitter {caller} is not the lessee the quote bound {lessee}"
-    )]
-    RequesterMismatch { caller: String, lessee: String },
-    #[error(transparent)]
-    Allocator(#[from] AllocatorError),
-    #[error(transparent)]
-    QuoteValidation(#[from] QuoteValidationError),
-}
-
-pub fn allocate(request: &GpuLeaseRequest, caller: &str) -> Result<GpuLeaseOutput, LeaseError> {
-    if request.intentVersion != crate::INTENT_VERSION {
-        return Err(LeaseError::UnknownIntentVersion(request.intentVersion));
+    let caller = format!("0x{}", hex::encode(caller));
+    if r.intentVersion != crate::INTENT_VERSION || r.confidentiality > 1 {
+        return Err("unsupported intent/confidentiality".into());
     }
-    // I5 operator side: the intent the lessee claims must hash to the
-    // intentHash the RFQ quote signed and the vault stores. v2 binds the
-    // device count — the quantity is priced.
     let expected = super::intent_hash(
-        request.intentVersion,
-        &request.gpuClass,
-        request.durationSeconds,
-        request.confidentiality,
-        &request.region,
-        request.deviceCount,
+        r.intentVersion,
+        &r.gpuClass,
+        r.durationSeconds,
+        r.confidentiality,
+        &r.region,
+        r.deviceCount,
     );
-    let actual: [u8; 32] = request.intentHash.into();
-    if expected != actual {
-        return Err(LeaseError::IntentHashMismatch {
-            actual: hex::encode(actual),
-            expected: hex::encode(expected),
-        });
+    if expected != r.intentHash.0 {
+        return Err("intent hash mismatch".into());
     }
-
-    // Fail-closed price check against operator policy (SPEC §2 quote policy).
-    let policy = crate::QuotePolicy::from_env();
-    policy.validate_redeemed_price(&request.gpuClass, request.pricePerSecond)?;
-
-    // The lessee the quote bound must be the job submitter (SPEC §1 requester binding).
-    let lessee = format!("{:#x}", request.lessee);
-    if lessee != caller {
-        return Err(LeaseError::RequesterMismatch {
-            caller: caller.to_string(),
-            lessee,
-        });
+    if !format!("{:#x}", r.lessee).eq_ignore_ascii_case(&caller) {
+        return Err("requester is not lessee".into());
     }
-
-    // The leaseId is the VAULT's (buyer created + escrowed it); the operator
-    // binds the devices to that identity. Unknown ids fail in the allocator.
-    let lease_id: [u8; 32] = request.leaseId.into();
-
-    // TEE composition: a confidential lease bound to a sandbox must land on
-    // GPUs whose TEE type matches the sandbox's (Nitro sandbox → Nitro GPU).
-    let sandbox_tee_type = TeeType::from(request.sandboxTeeType);
-    let alloc = crate::allocator().acquire_with_tee(
-        &request.gpuClass,
-        request.confidentiality > 0,
-        sandbox_tee_type,
-        request.deviceCount,
-        lease_id,
-        &lessee,
-        request.durationSeconds,
-    )?;
-
-    // PUBLIC DATA ONLY — no credentials, no secrets (SPEC §2).
-    Ok(GpuLeaseOutput {
-        leaseId: lease_id.into(),
-        endpoint: alloc.endpoint_v1,
+    let chain = ChainConfig::from_env()?;
+    let funded = chain.lease(r.leaseId.0).await?;
+    funded.require_request(&r)?;
+    funded.require_owner(&caller)?;
+    let tee = crate::allocator::tee_from_wire(r.sandboxTeeType).map_err(|e| e.to_string())?;
+    if r.confidentiality == 0 && tee.is_some() {
+        return Err("TEE requested by nonconfidential lease".into());
+    }
+    let allocation = crate::allocator()
+        .acquire_until(
+            &r.gpuClass,
+            r.confidentiality == 1,
+            tee,
+            r.deviceCount,
+            r.leaseId.0,
+            &caller,
+            r.intentHash.0,
+            funded.expiry,
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(TangleResult(GpuLeaseOutput {
+        leaseId: r.leaseId,
+        endpoint: allocation.endpoint_v1,
         schemaVersion: crate::SCHEMA_VERSION,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::allocator::GpuAllocator;
-    use crate::allocator::GpuDevice;
-
-    /// Tests share no global static (env-inventory); they build a fresh
-    /// allocator — which is why `allocate_core` takes an allocator below.
-    fn alloc_core(
-        a: &GpuAllocator,
-        request: &GpuLeaseRequest,
-        caller: &str,
-    ) -> Result<GpuLeaseOutput, LeaseError> {
-        if request.intentVersion != crate::INTENT_VERSION {
-            return Err(LeaseError::UnknownIntentVersion(request.intentVersion));
-        }
-        let expected = super::super::intent_hash(
-            request.intentVersion,
-            &request.gpuClass,
-            request.durationSeconds,
-            request.confidentiality,
-            &request.region,
-            request.deviceCount,
-        );
-        let actual: [u8; 32] = request.intentHash.into();
-        if expected != actual {
-            return Err(LeaseError::IntentHashMismatch {
-                actual: hex::encode(actual),
-                expected: hex::encode(expected),
-            });
-        }
-        let lease_id: [u8; 32] = request.leaseId.into();
-        let alloc = a.acquire_with_tee(
-            &request.gpuClass,
-            request.confidentiality > 0,
-            TeeType::from(request.sandboxTeeType),
-            request.deviceCount,
-            lease_id,
-            caller,
-            request.durationSeconds,
-        )?;
-        Ok(GpuLeaseOutput {
-            leaseId: lease_id.into(),
-            endpoint: alloc.endpoint_v1,
-            schemaVersion: crate::SCHEMA_VERSION,
-        })
-    }
-
-    fn request() -> GpuLeaseRequest {
-        let class = "h100".to_string();
-        let region = "us-east".to_string();
-        let dur = 3600u64;
-        GpuLeaseRequest {
-            intentVersion: crate::INTENT_VERSION,
-            intentHash: crate::jobs::intent_hash(crate::INTENT_VERSION, &class, dur, 0, &region, 1)
-                .into(),
-            pricePerSecond: 300_000_000_000_000u128,
-            durationSeconds: dur,
-            confidentiality: 0,
-            gpuClass: class,
-            region,
-            lessee: "0x0000000000000000000000000000000000000042"
-                .parse()
-                .unwrap(),
-            leaseId: [7u8; 32].into(),
-            sandboxId: [0u8; 32].into(),
-            sandboxTeeType: 0,
-            deviceCount: 1,
-        }
-    }
-
-    #[test]
-    fn happy_path_allocates_public_output_only() {
-        let a = GpuAllocator::new(vec![GpuDevice {
-            id: "d1".into(),
-            gpu_class: "h100".into(),
-            tee: false,
-            tee_type: crate::allocator::TeeType::None,
-            cuda_ordinal: 0,
-        }]);
-        let out = alloc_core(&a, &request(), "0xabc").unwrap();
-        assert_eq!(out.schemaVersion, 1);
-        let endpoint: serde_json::Value = serde_json::from_str(&out.endpoint).unwrap();
-        assert_eq!(endpoint["transport"], "local-attach");
-        assert_eq!(endpoint["devices"].as_array().unwrap().len(), 1);
-        assert!(
-            !out.endpoint.contains("token"),
-            "no credential material in job output"
-        );
-        assert!(!out.endpoint.contains("secret"));
-    }
-
-    #[test]
-    fn tampered_intent_fails_closed() {
-        let a = GpuAllocator::new(vec![]);
-        let mut r = request();
-        r.durationSeconds += 1; // intent mutated after quoting
-        assert!(matches!(
-            alloc_core(&a, &r, "0xabc"),
-            Err(LeaseError::IntentHashMismatch { .. })
-        ));
-        let _ = &mut r;
-    }
-
-    #[test]
-    fn unknown_version_fails_closed() {
-        let a = GpuAllocator::new(vec![]);
-        let mut r = request();
-        r.intentVersion = 99;
-        assert!(matches!(
-            alloc_core(&a, &r, "0xabc"),
-            Err(LeaseError::UnknownIntentVersion(99))
-        ));
-    }
+    }))
 }

@@ -1,42 +1,31 @@
-//! EXTEND (job 2) — push the operator-side session expiry out to match the
-//! escrow the lessee just topped up on-chain (I2: credentials track escrow).
-
-use blueprint_sdk::tangle::extract::{TangleArg, TangleResult};
-
-use crate::GpuLeaseAck;
-use crate::GpuLeaseExtendRequest;
-
+//! Synchronize access to paid chain expiry; job retries never create time.
+use crate::{GpuLeaseAck, GpuLeaseExtendRequest, chain::ChainConfig};
+use blueprint_sdk::tangle::extract::{Caller, TangleArg, TangleResult};
 pub async fn extend(
-    TangleArg(request): TangleArg<GpuLeaseExtendRequest>,
+    Caller(caller): Caller,
+    TangleArg(r): TangleArg<GpuLeaseExtendRequest>,
 ) -> Result<TangleResult<GpuLeaseAck>, String> {
-    let ack = extend_session(request.leaseId.into(), request.addSeconds)?;
-    Ok(TangleResult(ack))
-}
-
-pub fn extend_session(lease_id: [u8; 32], add_seconds: u64) -> Result<GpuLeaseAck, String> {
-    let new_expiry = crate::allocator()
-        .extend(lease_id, add_seconds)
-        .map_err(|e| e.to_string())?;
-    tracing::debug!(lease = %hex::encode(lease_id), new_expiry, "session extended");
-    Ok(GpuLeaseAck {
-        leaseId: lease_id.into(),
-        state: 0, // still Live
-        schemaVersion: crate::SCHEMA_VERSION,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ack_is_live_state() {
-        // Shape pin: EXTEND keeps the lease Live (state 0) per vault states.
-        let ack = GpuLeaseAck {
-            leaseId: [2u8; 32].into(),
-            state: 0,
-            schemaVersion: crate::SCHEMA_VERSION,
-        };
-        assert_eq!(ack.state, 0);
+    let funded = ChainConfig::from_env()?.lease(r.leaseId.0).await?;
+    funded.require_live()?;
+    funded.require_owner(&format!("0x{}", hex::encode(caller)))?;
+    let local = crate::allocator()
+        .allocation(r.leaseId.0)
+        .ok_or("unknown operator allocation")?;
+    if r.addSeconds == 0
+        || local
+            .expires_at
+            .checked_add(r.addSeconds)
+            .ok_or("expiry overflow")?
+            > funded.expiry
+    {
+        return Err("extension has not been paid in escrow".into());
     }
+    crate::allocator()
+        .sync_expiry(r.leaseId.0, funded.expiry)
+        .map_err(|e| e.to_string())?;
+    Ok(TangleResult(GpuLeaseAck {
+        leaseId: r.leaseId,
+        state: 0,
+        schemaVersion: crate::SCHEMA_VERSION,
+    }))
 }

@@ -11,11 +11,11 @@
 //!   5. exec the TS demo (vitest, env-gated) in the SDK worktree
 //!   6. assert the child exited 0
 
-use alloy_rpc_types::TransactionRequest;
 use anyhow::{Context, Result};
 use blueprint_anvil_testing_utils::{BlueprintHarness, missing_tnt_core_artifacts};
 use blueprint_sdk::alloy::primitives::{Address, Bytes, TxKind, U256};
 use blueprint_sdk::alloy::providers::{Provider, ProviderBuilder};
+use blueprint_sdk::alloy::rpc::types::TransactionRequest;
 use gpu_lease_blueprint_lib::api::operator_api_router;
 use gpu_lease_blueprint_lib::router;
 use once_cell::sync::Lazy;

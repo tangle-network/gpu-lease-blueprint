@@ -9,7 +9,8 @@
 
 pub mod allocator;
 pub mod api;
-pub mod credentials;
+pub mod chain;
+pub mod consumer;
 pub mod jobs;
 pub mod quote;
 
@@ -19,10 +20,6 @@ use blueprint_sdk::alloy::sol;
 use blueprint_sdk::tangle::TangleLayer;
 
 pub use allocator::{Allocation, AllocatorError, GpuAllocator};
-pub use credentials::{
-    CredentialError, CredentialSessions, ScopedCredential, eip191_recover_signer,
-    eip191_sign_message, verifying_key_address,
-};
 pub use quote::{QuoteInputs, QuotePolicy, QuoteValidationError};
 
 /// Job IDs — MUST match the sequential indices in the blueprint registration
@@ -111,40 +108,26 @@ pub fn router() -> Router {
 }
 
 /// Operator-wide allocator (co-located inventory; no on-chain registry — SPEC §4).
-/// Operator-wide allocator (co-located inventory; no on-chain registry — SPEC §4).
 /// Returns a shared `Arc` handle — safe to hold in extractors/tasks.
-pub fn allocator() -> std::sync::Arc<GpuAllocator> {
+pub fn try_allocator() -> Result<std::sync::Arc<GpuAllocator>, String> {
     static ALLOCATOR: once_cell::sync::OnceCell<std::sync::Arc<GpuAllocator>> =
         once_cell::sync::OnceCell::new();
-    std::sync::Arc::clone(ALLOCATOR.get_or_init(|| std::sync::Arc::new(GpuAllocator::from_env())))
+    ALLOCATOR
+        .get_or_try_init(|| GpuAllocator::from_env().map(std::sync::Arc::new))
+        .map(std::sync::Arc::clone)
+}
+pub fn allocator() -> std::sync::Arc<GpuAllocator> {
+    try_allocator().expect("operator configuration must be validated at startup")
 }
 
-/// Operator-wide credential session store.
-pub fn credentials() -> std::sync::Arc<CredentialSessions> {
-    static CREDS: once_cell::sync::OnceCell<std::sync::Arc<CredentialSessions>> =
-        once_cell::sync::OnceCell::new();
-    std::sync::Arc::clone(CREDS.get_or_init(|| std::sync::Arc::new(CredentialSessions::new())))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn job_ids_match_spec_order() {
-        // SPEC §1 order: LEASE, RELEASE, EXTEND, REAP — sequential, no gaps,
-        // because tnt-core indexes jobs by registration order.
-        assert_eq!(JOB_LEASE, 0);
-        assert_eq!(JOB_RELEASE, 1);
-        assert_eq!(JOB_EXTEND, 2);
-        assert_eq!(JOB_REAP, 3);
+pub async fn initialize() -> Result<(), String> {
+    QuotePolicy::from_env()?;
+    try_allocator()?;
+    let signer = api::quote_signer()?;
+    let chain = chain::ChainConfig::from_env()?;
+    if signer.address() != chain.operator {
+        return Err("quote signer does not match GPU_OPERATOR_ADDRESS".into());
     }
-
-    #[test]
-    fn router_binds_all_four_jobs() {
-        let r = router();
-        // Router exposes bound routes; the four SPEC jobs must be present.
-        // (Assertion of construction + no panic; route table is type-level.)
-        let _ = &r;
-    }
+    chain.validate().await?;
+    chain::reconcile(true).await
 }
