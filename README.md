@@ -16,12 +16,10 @@ forge soldeer install
 forge build
 cargo test --workspace
 forge test
-./scripts/run-e2e.sh
 DEMO_SDK_DIR=/path/to/agent-container/products/sandbox/sdk ./scripts/run-demo.sh
 ```
 
-Workspace and Foundry manifests own dependencies. The lib Anvil suite needs Docker; registration
-uses native Anvil, the CLI, Forge artifacts and a built operator.
+The lib Anvil suite needs Docker; registration uses native Anvil, the CLI and built artifacts.
 
 ## Deploy
 
@@ -29,7 +27,6 @@ Use an SDK keystore (`cargo tangle key import --help` supports interactive impor
 of arguments and logs. Supply the deployed manager as `GPU_LEASE_BSM` and the publisher's
 [SDK sources array](https://github.com/tangle-network/blueprint/blob/main/cli/src/command/deploy/definition.rs)
 with real artifact locations and SHA-256 digests as `BLUEPRINT_SOURCES_FILE`.
-The installed CLI's help owns deployment flags; its SDK settings loader owns required settings.
 Protocol addresses come from [tnt-core](https://github.com/tangle-network/tnt-core/tree/main/deployments/tempo).
 Production broadcasts await the approved D8 stack.
 
@@ -43,8 +40,7 @@ cargo tangle blueprint deploy tangle --network testnet \
   --status-registry-contract "$STATUS_REGISTRY_CONTRACT"
 ```
 
-The generator preserves current metadata and config; the SDK encodes, signs and submits.
-Prove normal registration against the full protocol snapshot:
+Prove SDK registration against the full protocol snapshot:
 
 ```bash
 cargo build -p gpu-lease-blueprint-bin

@@ -1,7 +1,6 @@
-# GPU lease design
+# GPU lease D8 target
 
-This is the D8 target. Contract, operator and ADC client changes must use the same
-released SDK types and lease ABI. See the README for implemented behavior and proof.
+Contracts, operator and ADC share the released SDK types and lease ABI.
 
 ## Escrow and quotes
 
@@ -39,10 +38,9 @@ startup.
 
 ## Registration and consumer proof
 
-`cargo tangle blueprint deploy` registers the generated blueprint definition using
-the SDK keystore and deployment path. The definition binds the manager, job schemas,
-metadata digest and operator artifact. This repository owns its metadata and
-contracts, while the SDK owns registration encoding and signing.
+`cargo tangle blueprint deploy` registers the generated definition through the SDK
+keystore. The definition binds the manager, job schemas, metadata digest and
+operator artifact.
 
 The acceptance run starts Anvil, deploys the contracts, starts the operator, and
 uses the ADC `sdk/gpu-lease` client to create, use and release a funded lease.
