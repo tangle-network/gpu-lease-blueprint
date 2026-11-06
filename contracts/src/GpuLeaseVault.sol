@@ -4,8 +4,8 @@ pragma solidity ^0.8.26;
 /// @title GpuLeaseVault — the fixed-point core of the GPU lease marketplace.
 /// @author Tangle Network
 /// @notice Escrow-backed GPU leases with parking-meter economics. This contract
-///         is deliberately minimal: money conservation, lease lifecycle, and a
-///         slashing hook. Pricing, inventory, GPU classes, and attach transports
+///         is deliberately minimal: money conservation and lease lifecycle;
+///         slashing belongs to tnt-core and the BSM. Pricing, inventory, GPU classes, and attach transports
 ///         are off-chain data (see SPEC.md) and must NEVER migrate on-chain.
 ///
 /// @dev INVARIANTS (the contract is correct iff these hold forever):
@@ -42,7 +42,6 @@ contract GpuLeaseVault {
     event LeaseExtended(bytes32 indexed leaseId, uint128 addedEscrow, uint64 newExpiry);
     event LeaseReleased(bytes32 indexed leaseId, uint128 refund, uint128 operatorTake);
     event LeaseReaped(bytes32 indexed leaseId, uint128 operatorTake, address caller);
-    event OperatorSlashed(address indexed operator, bytes32 indexed leaseId, uint256 amount);
 
     uint16 public constant SCHEMA_VERSION = 1;
     /// @dev Sanity cap on devices per lease — the platform caps at 16; the
@@ -144,18 +143,6 @@ contract GpuLeaseVault {
         operatorEarningsOf[l.operator] += take;
         operatorEarnings += take;
         emit LeaseReaped(leaseId, take, msg.sender);
-    }
-
-    /// @notice Slashing hook for tnt-core governance/operator-staking integration.
-    ///         Callable only on settled (Released/Reaped) leases — the RELEASE-
-    ///         attested violation path (SPEC §1). Money movement is delegated to
-    ///         the staking system; this records the penalty event.
-    /// @notice Slashing notification from tnt-core (fires after a slash executes).
-    /// @dev The vault does NOT manage slashing — tnt-core owns the lifecycle
-    ///      (proposeSlash → disputeSlash → executeSlash). This hook just records
-    ///      the outcome so the lease history is complete. See tangle-slashing.
-    function onOperatorSlashed(bytes32 leaseId, uint256 amount) external {
-        emit OperatorSlashed(leases[leaseId].operator, leaseId, amount);
     }
 
     /// @notice Operators withdraw settled earnings.

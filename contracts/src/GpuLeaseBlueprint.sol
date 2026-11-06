@@ -165,11 +165,15 @@ contract GpuLeaseBlueprint is BlueprintServiceManagerBase, ComputeProviderSlashi
         return _disputeOrigin(serviceId);
     }
 
-    function onUnappliedSlash(uint64 serviceId, bytes calldata offender, uint8 slashPercent) external override {
+    function onUnappliedSlash(uint64 serviceId, bytes calldata offender, uint8 slashPercent)
+        external
+        override
+        onlyFromTangle
+    {
         _recordSlashProposed(serviceId, offender, slashPercent);
     }
 
-    function onSlash(uint64 serviceId, bytes calldata offender, uint8 slashPercent) external override {
+    function onSlash(uint64 serviceId, bytes calldata offender, uint8 slashPercent) external override onlyFromTangle {
         _recordSlashExecuted(serviceId, offender, slashPercent);
     }
 

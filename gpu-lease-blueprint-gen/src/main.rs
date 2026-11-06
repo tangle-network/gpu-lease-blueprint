@@ -130,9 +130,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "metadata_hash": format!("{hash}"),
             "manager": manager,
             "config": {
-                "membership": "dynamic", "pricing": "event_driven",
+                "membership": "dynamic", "pricing": "pay_once",
                 "min_operators": 1, "max_operators": 100,
-                "subscription_rate": 0, "subscription_interval": 0, "event_rate": 1_000_000_000_000_000u64,
+                "subscription_rate": 0, "subscription_interval": 0, "event_rate": 0,
             },
             "metadata": {
                 "name": blueprint["name"], "description": blueprint["description"],

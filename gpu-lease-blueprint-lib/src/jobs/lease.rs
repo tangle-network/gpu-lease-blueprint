@@ -24,6 +24,9 @@ pub async fn lease(
     if !format!("{:#x}", r.lessee).eq_ignore_ascii_case(&caller) {
         return Err("requester is not lessee".into());
     }
+    crate::QuotePolicy::from_env()?
+        .require_lease_price(&r)
+        .map_err(|e| e.to_string())?;
     let chain = ChainConfig::from_env()?;
     let funded = chain.lease(r.leaseId.0).await?;
     funded.require_request(&r)?;
