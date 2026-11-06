@@ -4,22 +4,9 @@ Escrowed, per-second leases of operator-owned GPUs on Tangle. The
 [Sandbox SDK client](https://github.com/tangle-network/agent-container/tree/develop/products/sandbox/sdk/src/gpu-lease)
 drives quoting, escrow, operator jobs, access and release.
 
-[SPEC.md](./SPEC.md) defines the escrow invariants and SDK boundaries. The allocator serves
-operator-owned hardware; cloud capacity comes through the Blueprint SDK's remote providers.
-Client ABI and authentication updates are under review in
-[#17186](https://github.com/tangle-network/agent-container/pull/17186). The complete
-client/operator/chain proof and final security review remain pending.
-
-## Code
-
-| Path | Responsibility |
-|---|---|
-| `contracts/src/` | Lease escrow and tnt-core service manager |
-| `contracts/script/` | Deployment and blueprint registration |
-| `gpu-lease-blueprint-lib/` | Hardware allocation, durable state, operator HTTP API and jobs |
-| `gpu-lease-blueprint-bin/` | SDK runner and reconciliation |
-| `gpu-lease-blueprint-gen/` | Metadata generated from the Rust wire types |
-| `scripts/run-demo.sh` | ADC client through the operator and local chain |
+[SPEC.md](./SPEC.md) owns D8. The allocator serves operator hardware; cloud capacity uses the SDK.
+The [ADC update](https://github.com/tangle-network/agent-container/pull/17186), complete lease
+lifecycle proof and held contract review remain pending.
 
 ## Build and verify
 
@@ -33,19 +20,33 @@ forge test
 DEMO_SDK_DIR=/path/to/agent-container/products/sandbox/sdk ./scripts/run-demo.sh
 ```
 
-The root `Cargo.toml` owns the published Blueprint SDK version. Foundry's manifest and lockfile
-own contract dependencies. Anvil integration requires Docker and the Forge artifacts.
+Workspace and Foundry manifests own dependencies. The lib Anvil suite needs Docker; registration
+uses native Anvil, the CLI, Forge artifacts and a built operator.
 
 ## Deploy
 
-Select an encrypted Foundry account or hardware wallet. Set `TANGLE_CORE` from the protocol's
-deployment manifest and `BLUEPRINT_BINARY_SHA256` from the published operator artifact.
-For Tempo, use the network and deployment records owned by
-[tnt-core](https://github.com/tangle-network/tnt-core/tree/main/deployments/tempo).
+Use an SDK keystore (`cargo tangle key import --help` supports interactive import); keep keys out
+of arguments and logs. Supply the deployed manager as `GPU_LEASE_BSM` and the publisher's
+[SDK sources array](https://github.com/tangle-network/blueprint/blob/main/cli/src/command/deploy/definition.rs)
+with real artifact locations and SHA-256 digests as `BLUEPRINT_SOURCES_FILE`.
+The installed CLI's help owns deployment flags; its SDK settings loader owns required settings.
+Protocol addresses come from [tnt-core](https://github.com/tangle-network/tnt-core/tree/main/deployments/tempo).
+Production broadcasts await the approved D8 stack.
 
 ```bash
-forge script contracts/script/RegisterGpuLeaseBlueprint.s.sol \
-  --rpc-url "$RPC_URL" --account "$DEPLOY_ACCOUNT" --password-file /dev/stdin --broadcast --slow
+cargo run -p gpu-lease-blueprint-gen -- \
+  --definition "$DEFINITION_FILE" --manager "$GPU_LEASE_BSM" --sources "$BLUEPRINT_SOURCES_FILE"
+cargo tangle blueprint deploy tangle --network testnet \
+  --definition "$DEFINITION_FILE" --settings-file "$SETTINGS_FILE" \
+  --http-rpc-url "$RPC_URL" --ws-rpc-url "$WS_RPC_URL" --keystore-path "$KEYSTORE_PATH" \
+  --tangle-contract "$TANGLE_CORE" --staking-contract "$STAKING_CONTRACT" \
+  --status-registry-contract "$STATUS_REGISTRY_CONTRACT"
 ```
 
-The external audit required by SPEC §6 precedes mainnet deployment.
+The generator preserves current metadata and config; the SDK encodes, signs and submits.
+Prove normal registration against the full protocol snapshot:
+
+```bash
+cargo build -p gpu-lease-blueprint-bin
+cargo test -p gpu-lease-blueprint-gen --test registration -- --nocapture
+```

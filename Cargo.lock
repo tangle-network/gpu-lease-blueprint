@@ -4240,11 +4240,17 @@ dependencies = [
 name = "gpu-lease-blueprint-gen"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "blueprint-chain-setup-anvil",
  "blueprint-sdk",
+ "clap",
  "gpu-lease-blueprint-lib",
  "hex",
+ "same-file",
  "serde_json",
- "tiny-keccak",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

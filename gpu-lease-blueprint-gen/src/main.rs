@@ -1,49 +1,68 @@
-//! Generate metadata/blueprint.json from the operator's Solidity wire types.
-//! Registration publishes its data URI and keccak256 digest.
-//! Run: cargo run -p gpu-lease-blueprint-gen
-
-use blueprint_sdk::alloy::sol_types::SolStruct;
+use base64::{Engine, engine::general_purpose::STANDARD};
+use blueprint_sdk::alloy::{
+    primitives::{Address, keccak256},
+    sol_types::SolStruct,
+};
+use clap::Parser;
 use gpu_lease_blueprint_lib::{
     GpuLeaseAck, GpuLeaseExtendRequest, GpuLeaseIdRequest, GpuLeaseOutput, GpuLeaseRequest,
 };
-use tiny_keccak::{Hasher, Keccak};
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 
-fn keccak256(data: &[u8]) -> [u8; 32] {
-    let mut k = Keccak::v256();
-    k.update(data);
-    let mut out = [0u8; 32];
-    k.finalize(&mut out);
-    out
+#[derive(Parser)]
+#[command(about = "Generate wire metadata and an optional cargo-tangle definition")]
+struct Args {
+    #[arg(long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../metadata"))]
+    metadata_dir: PathBuf,
+    /// SDK definition output; requires a deployed manager and SDK source descriptors.
+    #[arg(long, requires_all = ["manager", "sources"])]
+    definition: Option<PathBuf>,
+    #[arg(long, requires = "definition")]
+    manager: Option<Address>,
+    /// JSON array in cargo-tangle's standard sources format, from the artifact publisher.
+    #[arg(long, requires = "definition")]
+    sources: Option<PathBuf>,
 }
 
-fn type_info<T: SolStruct>() -> serde_json::Value {
+fn output_path(path: &Path) -> std::io::Result<PathBuf> {
+    let mut path = std::path::absolute(path)?;
+    for _ in 0..40 {
+        match std::fs::read_link(&path) {
+            Ok(target) => path = path.parent().unwrap().join(target),
+            Err(_) => {
+                return Ok(path
+                    .parent()
+                    .unwrap()
+                    .canonicalize()?
+                    .join(path.file_name().unwrap()));
+            }
+        }
+    }
+    Err(std::io::Error::other("output symlink loop"))
+}
+
+fn type_info<T: SolStruct>() -> Value {
     let encode_type = T::eip712_encode_type().into_owned();
     let typehash = keccak256(encode_type.as_bytes());
-    serde_json::json!({
+    json!({
         "encodeType": encode_type,
-        "typehash": format!("0x{}", hex::encode(typehash)),
+        "typehash": format!("{typehash}"),
     })
 }
 
-fn job(
-    id: u8,
-    name: &str,
-    description: &str,
-    params: serde_json::Value,
-    result: serde_json::Value,
-) -> serde_json::Value {
-    serde_json::json!({
+fn job(id: u8, name: &str, description: &str, params: Value, result: Value) -> Value {
+    json!({
         "id": id,
         "name": name,
         "description": description,
-        // Job ids are positional and MUST match the Rust router + BSM constants.
         "params": params,
         "result": result,
     })
 }
 
-fn build_document() -> serde_json::Value {
-    serde_json::json!({
+fn build_document() -> Value {
+    json!({
         "schemaVersion": 1,
         "blueprint": {
             "id": "gpu-lease-blueprint",
@@ -56,11 +75,9 @@ fn build_document() -> serde_json::Value {
         "resource": {
             "kind": "gpu",
             "unit": "second",
-            "meter": "escrow",           // parking-meter: prepay, pro-rata refund
-            "settlement": "vault",        // escrow kernel + pro-rata, invariants I1–I5
+            "meter": "escrow",
+            "settlement": "vault",
             "quote": {
-                // The operator's composable bps policy (see quote.rs): the
-                // driver renders the "why" behind a price from these facts.
                 "factors": ["classBps", "utilizationCurve", "teePremiumBps"],
                 "endpoint": "/api/quote",       // probed, never registered
                 "capabilities": "/api/capabilities",
@@ -76,7 +93,6 @@ fn build_document() -> serde_json::Value {
             job(3, "reap", "Permissionless post-expiry teardown",
                 type_info::<GpuLeaseIdRequest>(), type_info::<GpuLeaseAck>()),
         ],
-        // Lease-state read surface for driver widgets (chain clock truth):
         "vault": {
             "leaseView": "leases(bytes32)",
             "states": { "0": "Live", "1": "Released", "2": "Reaped" },
@@ -84,24 +100,58 @@ fn build_document() -> serde_json::Value {
     })
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    std::fs::create_dir_all(&args.metadata_dir)?;
+    let out_path = args.metadata_dir.join("blueprint.json");
+    if let Some(path) = &args.definition {
+        if output_path(path)? == output_path(&out_path)?
+            || same_file::is_same_file(path, &out_path).unwrap_or(false)
+        {
+            return Err("definition and metadata outputs must be different files".into());
+        }
+    }
     let doc = build_document();
     let json = serde_json::to_string_pretty(&doc)?;
     let hash = keccak256(json.as_bytes());
 
-    let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../metadata");
-    std::fs::create_dir_all(&out_dir)?;
-    let out_path = out_dir.join("blueprint.json");
+    if let Some(path) = args.definition {
+        let manager = args.manager.unwrap();
+        if manager.is_zero() {
+            return Err("manager must be a deployed service manager address".into());
+        }
+        let sources: Vec<Value> = serde_json::from_slice(&std::fs::read(args.sources.unwrap())?)?;
+        if sources.is_empty() {
+            return Err("sources must contain published artifact descriptors".into());
+        }
+        let blueprint = &doc["blueprint"];
+        let definition = json!({
+            "metadata_uri": format!("data:application/json;base64,{}", STANDARD.encode(&json)),
+            "metadata_hash": format!("{hash}"),
+            "manager": manager,
+            "config": {
+                "membership": "dynamic", "pricing": "event_driven",
+                "min_operators": 1, "max_operators": 100,
+                "subscription_rate": 0, "subscription_interval": 0, "event_rate": 1_000_000_000_000_000u64,
+            },
+            "metadata": {
+                "name": blueprint["name"], "description": blueprint["description"],
+                "author": "Tangle", "category": blueprint["category"],
+                "code_repository": blueprint["codeRepository"],
+                "website": "https://tangle.network", "license": blueprint["license"],
+            },
+            "jobs": doc["jobs"].as_array().unwrap().iter().map(|job| json!({
+                "name": job["name"], "description": job["description"],
+            })).collect::<Vec<_>>(),
+            "sources": sources,
+            "supported_memberships": ["dynamic"],
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&definition)?)?;
+        println!("wrote {}", path.display());
+    }
     std::fs::write(&out_path, &json)?;
 
     println!("wrote {}", out_path.display());
-    println!("metadataHash = 0x{}", hex::encode(hash));
+    println!("metadataHash = {hash}");
     Ok(())
-}
-
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    }
 }
