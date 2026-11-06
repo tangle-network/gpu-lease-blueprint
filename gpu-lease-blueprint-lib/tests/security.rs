@@ -4,7 +4,7 @@ use axum::{body::Body, http::Request};
 use blueprint_sdk::{
     JobCall, JobResult,
     alloy::{
-        primitives::{Address, Bytes, U256, keccak256},
+        primitives::{Address, B256, Bytes, U256, keccak256},
         providers::{Provider, ProviderBuilder},
         rpc::types::TransactionRequest,
         sol,
@@ -214,7 +214,7 @@ fn request_operator() -> Address {
         .unwrap()
 }
 
-async fn restart_from_journal(lease_id: blueprint_sdk::alloy::primitives::B256) -> Result<()> {
+async fn restart_from_journal(lease_id: B256) -> Result<()> {
     let path = std::env::var("GPU_LEASE_STATE_PATH")?;
     let recovered = format!("{path}.restart");
     std::fs::copy(path, &recovered)?;
