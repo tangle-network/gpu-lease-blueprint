@@ -18,19 +18,11 @@ interface ITangle {
 ///         LEASE=0, RELEASE=1, EXTEND=2, REAP=3.
 /// @dev Run: forge script contracts/script/RegisterGpuLeaseBlueprint.s.sol --rpc-url $RPC_URL --broadcast --slow
 contract RegisterGpuLeaseBlueprint is Script {
-    // Anvil well-known deployer key (default when no PRIVATE_KEY env is set)
-    uint256 constant DEFAULT_DEPLOYER_KEY = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
-
-    // Tangle protocol addresses on a LocalTestnet anvil snapshot.
-    address constant DEFAULT_TANGLE = 0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9;
-
     function run() external {
-        uint256 deployerKey = vm.envOr("PRIVATE_KEY", DEFAULT_DEPLOYER_KEY);
-        address tangleAddr = vm.envOr("TANGLE_CORE", DEFAULT_TANGLE);
-
+        address tangleAddr = vm.envAddress("TANGLE_CORE");
+        require(tangleAddr.code.length != 0, "TANGLE_CORE has no deployed code");
         ITangle tangle = ITangle(tangleAddr);
-
-        vm.startBroadcast(deployerKey);
+        vm.startBroadcast();
 
         GpuLeaseVault vault = new GpuLeaseVault();
         GpuLeaseBlueprint bsm = new GpuLeaseBlueprint(address(vault), address(0));
@@ -58,9 +50,7 @@ contract RegisterGpuLeaseBlueprint is Script {
         if (bytes(metadataJson).length == 0) {
             metadataJson = vm.readFile("metadata/blueprint.json");
             metadataHash = keccak256(bytes(metadataJson));
-            metadataUri = string(
-                abi.encodePacked("data:application/json;base64,", Base64.encode(bytes(metadataJson)))
-            );
+            metadataUri = string(abi.encodePacked("data:application/json;base64,", Base64.encode(bytes(metadataJson))));
         }
     }
 
@@ -68,7 +58,8 @@ contract RegisterGpuLeaseBlueprint is Script {
         jobs = new Types.JobDefinition[](4);
         // Indices are positional — MUST match JOB_LEASE..JOB_REAP (0..3) and the Rust router.
         jobs[0] = Types.JobDefinition("lease", "Create an escrowed GPU lease (allocates a device)", "", "", "");
-        jobs[1] = Types.JobDefinition("release", "Voluntarily release a lease (pro-rata refund on the vault)", "", "", "");
+        jobs[1] =
+            Types.JobDefinition("release", "Voluntarily release a lease (pro-rata refund on the vault)", "", "", "");
         jobs[2] = Types.JobDefinition("extend", "Extend a lease session (escrow topped up on the vault)", "", "", "");
         jobs[3] = Types.JobDefinition("reap", "Permissionless post-expiry teardown", "", "", "");
     }
@@ -112,24 +103,21 @@ contract RegisterGpuLeaseBlueprint is Script {
         def.supportedMemberships[0] = Types.MembershipModel.Dynamic;
     }
 
-    /// Minimal valid container source (protocol requires >=1 source with >=1
-    /// binary carrying a non-zero sha256 — Errors.BlueprintSourcesRequired).
-    /// Replace the sha256 with the real image digest at publish time.
-    function _buildSources() internal pure returns (Types.BlueprintSource[] memory sources) {
+    function _buildSources() internal view returns (Types.BlueprintSource[] memory sources) {
+        bytes32 binaryHash = vm.envBytes32("BLUEPRINT_BINARY_SHA256");
+        require(binaryHash != bytes32(0), "BLUEPRINT_BINARY_SHA256 is required");
         sources = new Types.BlueprintSource[](1);
         Types.BlueprintBinary[] memory bins = new Types.BlueprintBinary[](1);
         bins[0] = Types.BlueprintBinary({
             arch: Types.BlueprintArchitecture.Amd64,
             os: Types.BlueprintOperatingSystem.Linux,
             name: "gpu-lease-blueprint",
-            sha256: bytes32(uint256(0xdeadbeef)) // TODO: real image digest at publish
+            sha256: binaryHash
         });
         sources[0] = Types.BlueprintSource({
             kind: Types.BlueprintSourceKind.Container,
             container: Types.ImageRegistrySource({
-                registry: "ghcr.io",
-                image: "tangle-network/gpu-lease-blueprint",
-                tag: "latest"
+                registry: "ghcr.io", image: "tangle-network/gpu-lease-blueprint", tag: "latest"
             }),
             wasm: Types.WasmSource({
                 runtime: Types.WasmRuntime.Unknown,
@@ -137,8 +125,8 @@ contract RegisterGpuLeaseBlueprint is Script {
                 artifactUri: "",
                 entrypoint: ""
             }),
-            native: Types.NativeSource({ fetcher: Types.BlueprintFetcherKind.None, artifactUri: "", entrypoint: "" }),
-            testing: Types.TestingSource({ cargoPackage: "", cargoBin: "", basePath: "" }),
+            native: Types.NativeSource({fetcher: Types.BlueprintFetcherKind.None, artifactUri: "", entrypoint: ""}),
+            testing: Types.TestingSource({cargoPackage: "", cargoBin: "", basePath: ""}),
             binaries: bins
         });
     }
