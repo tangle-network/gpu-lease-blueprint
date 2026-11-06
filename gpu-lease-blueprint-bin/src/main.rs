@@ -28,6 +28,9 @@ fn setup_log() {
 async fn main() -> Result<(), blueprint_sdk::Error> {
     setup_log();
 
+    gpu_lease_blueprint_lib::initialize()
+        .await
+        .map_err(blueprint_sdk::Error::Other)?;
     let env = BlueprintEnvironment::load()?;
     let tangle_client = env
         .tangle_client()
@@ -37,9 +40,9 @@ async fn main() -> Result<(), blueprint_sdk::Error> {
     let service_id: u64 = env
         .protocol_settings
         .tangle()
-        .ok()
-        .and_then(|s| s.service_id)
-        .unwrap_or_default();
+        .map_err(|e| blueprint_sdk::Error::Other(e.to_string()))?
+        .service_id
+        .ok_or_else(|| blueprint_sdk::Error::Other("service id is required".into()))?;
     info!(service_id, "starting gpu-lease-blueprint operator");
 
     let tangle_producer = TangleProducer::new(tangle_client.clone(), service_id);
@@ -47,9 +50,18 @@ async fn main() -> Result<(), blueprint_sdk::Error> {
     // Operator HTTP API — the UI's fuel (capabilities/quotes/lease status/
     // EIP-191 sessions). State-changing ops stay on-chain via the driver.
     let api_port: u16 = std::env::var("OPERATOR_API_PORT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(9100);
+        .unwrap_or_else(|_| "9100".into())
+        .parse()
+        .map_err(|_| blueprint_sdk::Error::Other("invalid OPERATOR_API_PORT".into()))?;
+    let sweep_secs: u64 = std::env::var("REAPER_SWEEP_INTERVAL_SECS")
+        .unwrap_or_else(|_| "30".into())
+        .parse()
+        .map_err(|_| blueprint_sdk::Error::Other("invalid REAPER_SWEEP_INTERVAL_SECS".into()))?;
+    if sweep_secs == 0 {
+        return Err(blueprint_sdk::Error::Other(
+            "REAPER_SWEEP_INTERVAL_SECS must be positive".into(),
+        ));
+    }
     let api_listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{api_port}"))
         .await
         .map_err(|e| blueprint_sdk::Error::Other(format!("operator API bind :{api_port}: {e}")))?;
@@ -63,26 +75,12 @@ async fn main() -> Result<(), blueprint_sdk::Error> {
         .ok();
     });
 
-    // Periodic sweep: free devices + revoke credentials at escrow exhaustion.
-    // Interval is operator policy (SPEC §2) — default 30s, tighter for local dev.
-    let sweep_secs: u64 = std::env::var("REAPER_SWEEP_INTERVAL_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(30);
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(sweep_secs));
         loop {
             interval.tick().await;
-            let freed = gpu_lease_blueprint_lib::allocator().reap_expired();
-            for alloc in freed {
-                let revoked =
-                    gpu_lease_blueprint_lib::credentials().revoke_for_lease(alloc.lease_id);
-                warn!(
-                    lease = ?alloc.lease_id,
-                    devices = ?alloc.device_ids,
-                    revoked,
-                    "reaped expired lease session"
-                );
+            if let Err(error) = gpu_lease_blueprint_lib::chain::reconcile(false).await {
+                warn!(%error,"lease reconciliation failed; access fails closed");
             }
         }
     });
@@ -92,12 +90,11 @@ async fn main() -> Result<(), blueprint_sdk::Error> {
     let result = BlueprintRunner::builder(tangle_config, env)
         .router(router())
         .producer(tangle_producer)
+        .consumer(gpu_lease_blueprint_lib::consumer::LeaseConsumer::new(
+            blueprint_sdk::tangle::TangleConsumer::new(tangle_client),
+        ))
         .run()
         .await;
 
-    if let Err(e) = result {
-        blueprint_sdk::error!("runner failed: {e:?}");
-    }
-
-    Ok(())
+    result.map_err(|e| blueprint_sdk::Error::Other(e.to_string()))
 }

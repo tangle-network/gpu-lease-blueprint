@@ -14,6 +14,7 @@ use gpu_lease_blueprint_lib::api::operator_api_router;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    gpu_lease_blueprint_lib::initialize().await?;
     let listen = std::env::var("OPERATOR_API_LISTEN").unwrap_or_else(|_| "127.0.0.1:9200".into());
     let listener = tokio::net::TcpListener::bind(&listen).await?;
     eprintln!("operator API listening on http://{listen} (inventory from GPU_INVENTORY_JSON)");

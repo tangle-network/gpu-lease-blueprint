@@ -19,11 +19,11 @@
 //! Requires Docker (colima). Skips gracefully when Docker/artifacts are
 //! missing — use `scripts/run-e2e.sh` for the proven invocation.
 
-use alloy_rpc_types::TransactionRequest;
 use anyhow::{Context, Result, bail};
 use blueprint_anvil_testing_utils::{BlueprintHarness, missing_tnt_core_artifacts};
 use blueprint_sdk::alloy::primitives::{Address, Bytes, U256};
 use blueprint_sdk::alloy::providers::{Provider, ProviderBuilder};
+use blueprint_sdk::alloy::rpc::types::TransactionRequest;
 use blueprint_sdk::alloy::sol;
 use blueprint_sdk::alloy::sol_types::{SolCall, SolEvent, SolValue};
 use gpu_lease_blueprint_lib::jobs;
@@ -364,7 +364,7 @@ impl Chain {
     async fn timestamp(&self) -> Result<u64> {
         let provider = self.provider().await?;
         let block = provider
-            .get_block(alloy_rpc_types::BlockId::latest())
+            .get_block(blueprint_sdk::alloy::eips::BlockId::latest())
             .await
             .context("latest block")?
             .context("no block")?;
@@ -766,11 +766,7 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
                 quote["intentHash"].as_str().unwrap(),
                 quote["validUntil"].as_u64().unwrap(),
             );
-            let recovered = gpu_lease_blueprint_lib::eip191_recover_signer(
-                &payload,
-                sig.trim_start_matches("0x"),
-            )
-            .context("signature must recover")?;
+            let recovered=format!("{:#x}", sig.parse::<blueprint_sdk::alloy::primitives::Signature>()?.recover_address_from_msg(&payload)?);
             anyhow::ensure!(recovered == claimed, "recovered {recovered} != claimed {claimed}");
             eprintln!("operator API leg: signed quote verified, operator={claimed}");
 

@@ -13,12 +13,6 @@
     "unit": "second",
     "meter": "escrow",
     "settlement": "vault",
-    "classes": [
-      "a100-80gb",
-      "b200",
-      "h100",
-      "h100-tee"
-    ],
     "quote": {
       "factors": [
         "classBps",

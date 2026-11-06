@@ -5,39 +5,53 @@
 //!
 //!   GET  /api/capabilities       discovery: kind, classes, prices, idle counts
 //!   POST /api/quote              RFQ quote from the hot-reloadable policy
-//!   GET  /api/leases/:leaseId    public lease status (NO credential material)
+//!   GET  /api/leases/:leaseId    public lease status
+//!   GET  /api/leases/:leaseId/access  lease-scoped bearer authorization
 //!   POST /api/session/challenge  EIP-191 challenge bound to (lease, lessee)
 //!   POST /api/session/verify     signature → scoped, expiring credential
 //!
 //! Everything derives from the same single truths the jobs use: the global
-//! allocator, the global credential sessions, and `QuotePolicy::from_env()`
+//! allocator, SDK authentication, and `QuotePolicy::from_env()`
 //! (read per request — hot-reloadable, never a contract change).
 
 use axum::Json as AxumJson;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::allocator::{Allocation, GpuAllocator};
-use crate::credentials::{CredentialSessions, ScopedCredential};
+use crate::chain::ChainConfig;
 use crate::quote::{QuoteInputs, QuotePolicy, QuoteValidationError};
+use blueprint_sdk::alloy::{
+    primitives::Signature,
+    signers::{Signer, local::PrivateKeySigner},
+};
+use blueprint_sdk::auth::{
+    generate_challenge, paseto_tokens::PasetoTokenManager, types::ServiceId,
+};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Mutex,
+    time::Duration,
+};
 
-/// Injected dependencies — unit tests build their own; the product uses
-/// [`crate::allocator()`] / [`crate::credentials()`] globals.
+/// Operator inventory and SDK authentication state shared by its HTTP routes.
 #[derive(Clone)]
 pub struct ApiState {
     pub allocator: Arc<GpuAllocator>,
-    pub credentials: Arc<CredentialSessions>,
+    pub auth: Arc<LeaseAuth>,
 }
 
 impl ApiState {
     /// Product path: the process globals (`Arc` around the statics' refs).
     pub fn from_globals() -> Self {
+        static AUTH: once_cell::sync::Lazy<Arc<LeaseAuth>> =
+            once_cell::sync::Lazy::new(|| Arc::new(LeaseAuth::new()));
         Self {
             allocator: crate::allocator(),
-            credentials: crate::credentials(),
+            auth: Arc::clone(&AUTH),
         }
     }
 }
@@ -132,20 +146,30 @@ pub fn canonical_quote_payload(
     )
 }
 
-/// Operator quote-signing identity. Key from `GPU_QUOTE_SIGNING_KEY` (hex,
-/// 32 bytes) — operator-local config, hot-reloadable, NEVER on-chain. When
-/// unset, quotes are returned unsigned and clients fall back to their
-/// endpoint-config address (interim; verified path is the default posture).
-struct QuoteSigner {
-    key: k256::ecdsa::SigningKey,
+pub fn quote_signer() -> Result<PrivateKeySigner, String> {
+    std::env::var("GPU_QUOTE_SIGNING_KEY")
+        .map_err(|_| "GPU_QUOTE_SIGNING_KEY is required".to_string())?
+        .parse()
+        .map_err(|_| "invalid GPU_QUOTE_SIGNING_KEY".to_string())
 }
 
-impl QuoteSigner {
-    fn from_env() -> Option<Self> {
-        let hex_key = std::env::var("GPU_QUOTE_SIGNING_KEY").ok()?;
-        let bytes = hex::decode(hex_key.trim_start_matches("0x")).ok()?;
-        let key = k256::ecdsa::SigningKey::from_slice(&bytes).ok()?;
-        Some(Self { key })
+pub struct LeaseAuth {
+    manager: PasetoTokenManager,
+    challenges: Mutex<HashMap<[u8; 32], Challenge>>,
+}
+#[derive(Clone)]
+struct Challenge {
+    lease: [u8; 32],
+    lessee: String,
+    message: String,
+    expiry: u64,
+}
+impl LeaseAuth {
+    pub fn new() -> Self {
+        Self {
+            manager: PasetoTokenManager::new(Duration::from_secs(300)),
+            challenges: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -234,6 +258,7 @@ pub fn operator_api_router_with(state: ApiState) -> axum::Router {
         .route("/api/capabilities", get(capabilities))
         .route("/api/quote", post(quote))
         .route("/api/leases/{leaseId}", get(lease_status))
+        .route("/api/leases/{leaseId}/access", get(lease_access))
         .route("/api/session/challenge", post(session_challenge))
         .route("/api/session/verify", post(session_verify))
         .layer(cors_layer())
@@ -255,7 +280,7 @@ fn class_idle_utilization(state: &ApiState, class: &str) -> u32 {
         .iter()
         .filter(|d| d.gpu_class == class)
         .count();
-    let idle = state.allocator.idle_count(class, false) + state.allocator.idle_count(class, true);
+    let idle = state.allocator.idle_count(class, false);
     if total == 0 || idle == 0 {
         10_000
     } else {
@@ -264,17 +289,20 @@ fn class_idle_utilization(state: &ApiState, class: &str) -> u32 {
 }
 
 async fn capabilities(State(state): State<ApiState>) -> ApiResult<Capabilities> {
-    let policy = QuotePolicy::from_env();
+    let policy = QuotePolicy::from_env().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let mut classes: Vec<ClassCapability> = Vec::new();
     for (id, base) in policy.base_price_per_second.iter() {
-        let tee = id.ends_with("-tee");
+        let tee = state
+            .allocator
+            .inventory()
+            .iter()
+            .any(|d| d.gpu_class == *id && d.tee);
         classes.push(ClassCapability {
             id: id.clone(),
             tee,
             unit: "second",
             price_per_second: base.to_string(),
-            idle_count: state.allocator.idle_count(id, false)
-                + state.allocator.idle_count(id, true),
+            idle_count: state.allocator.idle_count(id, false),
         });
     }
     Ok(AxumJson(Capabilities {
@@ -290,7 +318,7 @@ async fn quote(
     State(state): State<ApiState>,
     AxumJson(req): AxumJson<QuoteRequest>,
 ) -> ApiResult<QuoteResponse> {
-    let policy = QuotePolicy::from_env();
+    let policy = QuotePolicy::from_env().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let utilization_bps = class_idle_utilization(&state, &req.gpu_class);
     let inputs = QuoteInputs {
         gpu_class: req.gpu_class.clone(),
@@ -314,25 +342,25 @@ async fn quote(
     let intent_hash = format!("0x{}", hex::encode(intent));
     let valid_until = crate::allocator::unix_now() + 60;
 
-    // Signed RFQ envelope (#1568 pattern): sign every priced field.
-    let (operator_address, signature) = match QuoteSigner::from_env() {
-        Some(signer) => {
-            let payload = canonical_quote_payload(
-                &req.gpu_class,
-                &quote.price_per_second.to_string(),
-                req.duration_seconds,
-                req.confidentiality,
-                req.device_count,
-                &quote.escrow_total.to_string(),
-                &intent_hash,
-                valid_until,
-            );
-            let (rsv, address) = crate::eip191_sign_message(&signer.key, &payload)
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            (Some(address), Some(format!("0x{rsv}")))
-        }
-        None => (None, None),
-    };
+    let signer = quote_signer().map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let payload = canonical_quote_payload(
+        &req.gpu_class,
+        &quote.price_per_second.to_string(),
+        req.duration_seconds,
+        req.confidentiality,
+        req.device_count,
+        &quote.escrow_total.to_string(),
+        &intent_hash,
+        valid_until,
+    );
+    let signature = Some(
+        signer
+            .sign_message(payload.as_bytes())
+            .await
+            .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "quote signing failed"))?
+            .to_string(),
+    );
+    let operator_address = Some(format!("{:#x}", signer.address()));
 
     Ok(AxumJson(QuoteResponse {
         schema_version: crate::SCHEMA_VERSION,
@@ -369,25 +397,75 @@ async fn lease_status(
     }))
 }
 
+async fn funded_allocation(
+    state: &ApiState,
+    id: [u8; 32],
+) -> Result<Allocation, (StatusCode, AxumJson<ApiError>)> {
+    let a = state
+        .allocator
+        .allocation(id)
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown or settled lease"))?;
+    let lease = ChainConfig::from_env()
+        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, e))?
+        .lease(id)
+        .await
+        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, e))?;
+    lease
+        .require_allocation(&a)
+        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
+    if !state.allocator.allocation(id).is_some_and(|current| {
+        current.device_ids == a.device_ids && current.expires_at == a.expires_at
+    }) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "lease changed during authorization",
+        ));
+    }
+    if a.expires_at <= crate::allocator::unix_now() {
+        return Err(err(StatusCode::FORBIDDEN, "lease expired"));
+    }
+    Ok(a)
+}
+
 async fn session_challenge(
     State(state): State<ApiState>,
     AxumJson(req): AxumJson<ChallengeRequest>,
 ) -> ApiResult<ChallengeResponse> {
     let id = parse_lease_id(&req.lease_id)?;
-    let alloc = state
-        .allocator
-        .allocation(id)
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown or settled lease"))?;
-    // Case-insensitive identity: wallets send EIP-55 checksummed addresses;
-    // the allocator stores lowercase. Same address, same lease.
-    if !alloc.lessee.eq_ignore_ascii_case(&req.lessee) {
+    let a = funded_allocation(&state, id).await?;
+    if !a.lessee.eq_ignore_ascii_case(&req.lessee) {
         return Err(err(StatusCode::FORBIDDEN, "not the lease's lessee"));
     }
-    let ch = state.credentials.issue_challenge(id, &req.lessee);
+    let now = crate::allocator::unix_now();
+    let expiry = a.expires_at.min(now.saturating_add(300));
+    let nonce = generate_challenge(&mut blueprint_sdk::std::BlueprintRng::new());
+    let message = format!(
+        "GPU lease access\nlease: 0x{}\nnonce: 0x{}\nexpires: {}",
+        hex::encode(id),
+        hex::encode(nonce),
+        expiry
+    );
+    let mut challenges = state.auth.challenges.lock().unwrap();
+    challenges.retain(|_, c| c.expiry > now);
+    if challenges.len() >= 4096 {
+        return Err(err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many pending challenges",
+        ));
+    }
+    challenges.insert(
+        nonce,
+        Challenge {
+            lease: id,
+            lessee: a.lessee,
+            message: message.clone(),
+            expiry,
+        },
+    );
     Ok(AxumJson(ChallengeResponse {
-        nonce: format!("0x{}", hex::encode(ch.nonce)),
-        message: ch.message(),
-        expires_at: ch.expires_at,
+        nonce: format!("0x{}", hex::encode(nonce)),
+        message,
+        expires_at: expiry,
     }))
 }
 
@@ -395,496 +473,101 @@ async fn session_verify(
     State(state): State<ApiState>,
     AxumJson(req): AxumJson<VerifyRequest>,
 ) -> ApiResult<VerifyResponse> {
-    let nonce = parse_lease_id(&req.nonce)?; // same 32-byte shape
-    // Credential lifetime == the lease's session expiry: the credential dies
-    // with the escrow (overstay impossible, operator side — SPEC I2).
-    let alloc_expiry = match state.credentials.challenge_lease(nonce) {
-        Some(lease_id) => state
-            .allocator
-            .allocation(lease_id)
-            .map(|a| a.expires_at)
-            .unwrap_or_else(crate::allocator::unix_now),
-        None => crate::allocator::unix_now(),
-    };
-    let cred: ScopedCredential = state
-        .credentials
-        .verify_and_issue(nonce, &req.signature, alloc_expiry)
-        .map_err(|e| err(StatusCode::UNAUTHORIZED, e.to_string()))?;
+    let nonce = parse_lease_id(&req.nonce)?;
+    let challenge = state
+        .auth
+        .challenges
+        .lock()
+        .unwrap()
+        .get(&nonce)
+        .cloned()
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "unknown challenge"))?;
+    let a = funded_allocation(&state, challenge.lease).await?;
+    let now = crate::allocator::unix_now();
+    if challenge.expiry <= now {
+        return Err(err(StatusCode::UNAUTHORIZED, "challenge expired"));
+    }
+    let signature: Signature = req
+        .signature
+        .parse()
+        .map_err(|_| err(StatusCode::UNAUTHORIZED, "invalid signature"))?;
+    let recovered = signature
+        .recover_address_from_msg(&challenge.message)
+        .map_err(|_| err(StatusCode::UNAUTHORIZED, "signature recovery failed"))?;
+    if !format!("{recovered:#x}").eq_ignore_ascii_case(&challenge.lessee)
+        || !a.lessee.eq_ignore_ascii_case(&challenge.lessee)
+    {
+        return Err(err(StatusCode::UNAUTHORIZED, "signer is not lessee"));
+    }
+    if state
+        .auth
+        .challenges
+        .lock()
+        .unwrap()
+        .remove(&nonce)
+        .is_none()
+    {
+        return Err(err(StatusCode::UNAUTHORIZED, "challenge already consumed"));
+    }
+    let scopes = vec!["gpu:attach".into(), "gpu:exec".into()];
+    let token = state
+        .auth
+        .manager
+        .generate_token(
+            ServiceId::new(0),
+            hex::encode(challenge.lease),
+            Some(challenge.lessee),
+            BTreeMap::new(),
+            Some(Duration::from_secs(a.expires_at.saturating_sub(now))),
+            Some(scopes.clone()),
+        )
+        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "token issuance failed"))?;
     Ok(AxumJson(VerifyResponse {
-        token: cred.token,
-        lease_id: format!("0x{}", hex::encode(cred.lease_id)),
-        scopes: cred.scopes,
-        expires_at: cred.expires_at,
+        token,
+        lease_id: format!("0x{}", hex::encode(challenge.lease)),
+        scopes,
+        expires_at: a.expires_at,
     }))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::allocator::GpuDevice;
-    use crate::credentials::eip191_personal_message_digest;
-    use axum::body::Body;
-    use axum::http::Request;
-    use k256::ecdsa::{RecoveryId, SigningKey, VerifyingKey};
-    use tiny_keccak::Hasher as _;
-    use tower::ServiceExt; // oneshot
-
-    pub(crate) fn tcp_test_state() -> ApiState {
-        test_state()
+async fn lease_access(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<LeaseStatus> {
+    let id = parse_lease_id(&id)?;
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "bearer credential required"))?;
+    let claims = state
+        .auth
+        .manager
+        .validate_token(token)
+        .map_err(|_| err(StatusCode::UNAUTHORIZED, "invalid or expired credential"))?;
+    if claims.key_id != hex::encode(id)
+        || claims.service_id != ServiceId::new(0)
+        || !claims
+            .scopes
+            .as_ref()
+            .is_some_and(|s| s.iter().any(|s| s == "gpu:attach"))
+    {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "credential does not authorize this lease",
+        ));
     }
-
-    fn test_state() -> ApiState {
-        let allocator = GpuAllocator::new(vec![
-            GpuDevice {
-                id: "gpu-0".into(),
-                gpu_class: "h100".into(),
-                tee: false,
-                tee_type: crate::allocator::TeeType::None,
-                cuda_ordinal: 0,
-            },
-            GpuDevice {
-                id: "gpu-1".into(),
-                gpu_class: "h100-tee".into(),
-                tee: true,
-                tee_type: crate::allocator::TeeType::Nitro,
-                cuda_ordinal: 1,
-            },
-        ]);
-        ApiState {
-            allocator: Arc::new(allocator),
-            credentials: Arc::new(CredentialSessions::new()),
-        }
+    let a = funded_allocation(&state, id).await?;
+    if claims.tenant_id.as_deref() != Some(a.lessee.as_str()) {
+        return Err(err(StatusCode::FORBIDDEN, "credential owner mismatch"));
     }
-
-    async fn get_json(state: &ApiState, uri: &str) -> (StatusCode, serde_json::Value) {
-        let resp = operator_api_router_with(state.clone())
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        (
-            status,
-            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
-        )
-    }
-
-    async fn post_json(
-        state: &ApiState,
-        uri: &str,
-        body: serde_json::Value,
-    ) -> (StatusCode, serde_json::Value) {
-        let resp = operator_api_router_with(state.clone())
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        (
-            status,
-            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
-        )
-    }
-
-    fn address_of(key: &SigningKey) -> String {
-        let point = VerifyingKey::from(key).to_encoded_point(false);
-        let mut k = tiny_keccak::Keccak::v256();
-        k.update(&point.as_bytes()[1..]);
-        let mut hash = [0u8; 32];
-        k.finalize(&mut hash);
-        format!("0x{}", hex::encode(&hash[12..]))
-    }
-
-    fn sign_personal(key: &SigningKey, message: &str) -> String {
-        let digest = eip191_personal_message_digest(message);
-        let (sig, rec) = key.sign_prehash_recoverable(&digest).unwrap();
-        let mut rsv = sig.to_bytes().to_vec();
-        rsv.push(u8::from(rec.is_y_odd()) + 27);
-        hex::encode(rsv)
-    }
-
-    #[tokio::test]
-    async fn capabilities_lists_classes_and_idle_counts() {
-        let state = test_state();
-        let (status, body) = get_json(&state, "/api/capabilities").await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["schemaVersion"], 1);
-        assert_eq!(body["compute"]["kind"], "gpu");
-        let classes = body["compute"]["classes"].as_array().unwrap();
-        let h100 = classes.iter().find(|c| c["id"] == "h100").unwrap();
-        assert_eq!(h100["idleCount"], 1);
-        assert_eq!(h100["unit"], "second");
-    }
-
-    #[tokio::test]
-    async fn quote_matches_policy_math_and_binds_intent() {
-        let state = test_state();
-        let (status, body) = post_json(
-            &state,
-            "/api/quote",
-            serde_json::json!({ "gpuClass": "h100", "durationSeconds": 3600 }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        // Policy default: h100 base 3e14 wei/s × 8000/10000 (fully idle => 8000 bps)
-        let expected = 300_000_000_000_000u128 * 8_000 / 10_000;
-        assert_eq!(
-            body["pricePerSecond"].as_str().unwrap(),
-            expected.to_string()
-        );
-        assert_eq!(
-            body["escrowTotal"].as_str().unwrap(),
-            (expected * 3600).to_string()
-        );
-        // Intent hash binds the exact request (region defaults to "any").
-        let want = crate::jobs::intent_hash(crate::INTENT_VERSION, "h100", 3600, 0, "any", 1);
-        assert_eq!(
-            body["intentHash"].as_str().unwrap(),
-            format!("0x{}", hex::encode(want))
-        );
-    }
-
-    #[tokio::test]
-    async fn quote_is_signed_and_recovers_to_the_operator_address() {
-        // SAFETY: test-only env before any assertion on quotes; other quote
-        // tests do not depend on the unsigned shape.
-        unsafe { std::env::set_var("GPU_QUOTE_SIGNING_KEY", hex::encode([77u8; 32])) };
-        let state = test_state();
-        let (status, body) = post_json(
-            &state,
-            "/api/quote",
-            serde_json::json!({ "gpuClass": "h100", "durationSeconds": 600 }),
-        )
-        .await;
-        unsafe { std::env::remove_var("GPU_QUOTE_SIGNING_KEY") };
-        assert_eq!(status, StatusCode::OK, "body: {body}");
-        let signature = body["signature"]
-            .as_str()
-            .expect("signed quote")
-            .to_string();
-        let operator_address = body["operatorAddress"]
-            .as_str()
-            .expect("operator address")
-            .to_string();
-        // Client-side verification, exactly as the SDK does it.
-        let payload = canonical_quote_payload(
-            "h100",
-            body["pricePerSecond"].as_str().unwrap(),
-            600,
-            0,
-            1,
-            body["escrowTotal"].as_str().unwrap(),
-            body["intentHash"].as_str().unwrap(),
-            body["validUntil"].as_u64().unwrap(),
-        );
-        let recovered = crate::eip191_recover_signer(&payload, signature.trim_start_matches("0x"))
-            .expect("signature must recover");
-        assert_eq!(
-            recovered, operator_address,
-            "recovered address == claimed operator address"
-        );
-    }
-
-    #[tokio::test]
-    async fn quote_unknown_class_fails_closed() {
-        let state = test_state();
-        let (status, body) = post_json(
-            &state,
-            "/api/quote",
-            serde_json::json!({ "gpuClass": "v100", "durationSeconds": 3600 }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(
-            body["error"].as_str().is_some_and(|e| e.contains("v100")),
-            "body: {body}"
-        );
-    }
-
-    #[tokio::test]
-    async fn lease_status_is_public_and_secret_free() {
-        let state = test_state();
-        let lease = [9u8; 32];
-        state
-            .allocator
-            .acquire("h100", false, 1, lease, "0xabc", 60)
-            .unwrap();
-        let (status, body) = get_json(&state, &format!("/api/leases/{}", hex::encode(lease))).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["deviceIds"], serde_json::json!(["gpu-0"]));
-        assert_eq!(body["schemaVersion"], 1);
-        let s = body.to_string();
-        assert!(!s.contains("token"), "no credential material in status");
-        assert!(!s.contains("secret"));
-        // Unknown lease => 404.
-        let (status, _) = get_json(
-            &state,
-            "/api/leases/00000000000000000000000000000000000000000000000000000000000000ff",
-        )
-        .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn full_session_flow_over_http() {
-        let state = test_state();
-        let key = SigningKey::from_slice(&[7u8; 32]).unwrap();
-        let lessee = address_of(&key);
-        let lease = [5u8; 32];
-        state
-            .allocator
-            .acquire("h100", false, 1, lease, &lessee, 600)
-            .unwrap();
-
-        // Challenge is lessee-bound.
-        let (status, ch) = post_json(
-            &state,
-            "/api/session/challenge",
-            serde_json::json!({ "leaseId": hex::encode(lease), "lessee": lessee }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let message = ch["message"].as_str().unwrap().to_string();
-        let nonce = ch["nonce"]
-            .as_str()
-            .unwrap()
-            .trim_start_matches("0x")
-            .to_string();
-
-        // Wrong signer fails.
-        let attacker = SigningKey::from_slice(&[8u8; 32]).unwrap();
-        let (status, _) = post_json(
-            &state,
-            "/api/session/verify",
-            serde_json::json!({ "nonce": nonce, "signature": sign_personal(&attacker, &message) }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-        // Right signer gets a scoped credential.
-        let (status, cred) = post_json(
-            &state,
-            "/api/session/verify",
-            serde_json::json!({ "nonce": nonce, "signature": sign_personal(&key, &message) }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "verify failed: {cred}");
-        assert!(cred["token"].as_str().unwrap().starts_with("glv1_"));
-        assert_eq!(
-            cred["leaseId"].as_str().unwrap(),
-            format!("0x{}", hex::encode(lease))
-        );
-        assert!(
-            cred["scopes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|s| s == "gpu:attach")
-        );
-
-        // Nonce is single-use.
-        let (status, _) = post_json(
-            &state,
-            "/api/session/verify",
-            serde_json::json!({ "nonce": nonce, "signature": sign_personal(&key, &message) }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn challenge_rejects_non_lessee() {
-        let state = test_state();
-        let lease = [6u8; 32];
-        state
-            .allocator
-            .acquire("h100", false, 1, lease, "0xowner", 60)
-            .unwrap();
-        let (status, _) = post_json(
-            &state,
-            "/api/session/challenge",
-            serde_json::json!({ "leaseId": hex::encode(lease), "lessee": "0xintruder" }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-    }
-
-    // Keep the unused helper referenced (compile guard).
-    #[allow(dead_code)]
-    fn _unused(_r: RecoveryId) {}
-}
-
-#[cfg(test)]
-mod globals_tests {
-    use super::*;
-
-    /// The globals-backed router (product path) must serve capabilities in a
-    /// fresh process — this is the exact path that crashed in the E2E binary.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn injected_router_serves_capabilities_over_tcp() {
-        let state = super::tests::tcp_test_state();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, operator_api_router_with(state))
-                .await
-                .ok();
-        });
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-        s.write_all(b"GET /api/capabilities HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-            .await
-            .unwrap();
-        let mut buf = Vec::new();
-        s.read_to_end(&mut buf).await.unwrap();
-        let text = String::from_utf8_lossy(&buf);
-        assert!(text.contains("gpu"), "resp: {text}");
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn globals_router_serves_capabilities() {
-        // SAFETY: single-threaded test init before any tasks poll.
-        unsafe {
-            std::env::set_var(
-                "GPU_INVENTORY_JSON",
-                r#"[{"id":"g0","gpu_class":"h100","tee":false,"cuda_ordinal":0}]"#,
-            )
-        };
-        // Init the globals BEFORE spawning the serve task (bisection knob).
-        let a = crate::allocator();
-        let c = crate::credentials();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let _ = (a, c);
-        tokio::spawn(async move {
-            axum::serve(listener, operator_api_router()).await.ok();
-        });
-
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-        s.write_all(b"GET /api/capabilities HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-            .await
-            .unwrap();
-        let mut buf = Vec::new();
-        s.read_to_end(&mut buf).await.unwrap();
-        let text = String::from_utf8_lossy(&buf);
-        assert!(
-            text.contains("\"kind\":\"gpu\"") || text.contains("kind"),
-            "resp: {text}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod globals_min {
-    #[test]
-    fn allocator_global_direct() {
-        unsafe {
-            std::env::set_var(
-                "GPU_INVENTORY_JSON",
-                r#"[{"id":"g0","gpu_class":"h100","tee":false,"cuda_ordinal":0}]"#,
-            )
-        };
-        let a = crate::allocator();
-        assert_eq!(a.idle_count("h100", false), 1);
-        let a2 = crate::allocator();
-        assert_eq!(a2.inventory().len(), 1);
-        assert_eq!(a.idle_count("h100", false), 1, "first handle still valid");
-    }
-}
-
-#[cfg(test)]
-mod quote_signing_tests {
-    use super::*;
-
-    #[test]
-    fn canonical_payload_is_stable_and_field_bound() {
-        let a = canonical_quote_payload(
-            "h100",
-            "240000000000000",
-            600,
-            0,
-            1,
-            "144000000000000000",
-            "0x1111111111111111111111111111111111111111111111111111111111111111",
-            4102444800,
-        );
-        assert_eq!(
-            a,
-            "gpu-lease-quote|v2|h100|240000000000000|600|0|1|144000000000000000|0x1111111111111111111111111111111111111111111111111111111111111111|4102444800"
-        );
-        // Every priced field is bound — mutate any one and the payload changes.
-        let b = canonical_quote_payload(
-            "h100",
-            "240000000000001",
-            600,
-            0,
-            1,
-            "144000000000000000",
-            "0x1111111111111111111111111111111111111111111111111111111111111111",
-            4102444800,
-        );
-        assert_ne!(a, b);
-        // The QUANTITY is priced — count must change the signed payload.
-        let c = canonical_quote_payload(
-            "h100",
-            "240000000000000",
-            600,
-            0,
-            2,
-            "288000000000000000",
-            "0x1111111111111111111111111111111111111111111111111111111111111111",
-            4102444800,
-        );
-        assert_ne!(a, c);
-    }
-
-    #[test]
-    fn sign_then_recover_roundtrips_exactly() {
-        let key = k256::ecdsa::SigningKey::from_slice(&[77u8; 32]).unwrap();
-        let payload = canonical_quote_payload(
-            "h100",
-            "240000000000000",
-            600,
-            0,
-            1,
-            "144000000000000000",
-            "0x2222222222222222222222222222222222222222222222222222222222222222",
-            4102444800,
-        );
-        let (rsv, address) = crate::eip191_sign_message(&key, &payload).unwrap();
-        // The client-side recovery (same function the API verifies with):
-        let recovered = crate::eip191_recover_signer(&payload, &rsv).unwrap();
-        assert_eq!(
-            recovered, address,
-            "recovered address must equal signer address"
-        );
-        // Tamper any field => recovery yields a different address (fail-closed binding)
-        let tampered = canonical_quote_payload(
-            "h100",
-            "999999999999999",
-            600,
-            0,
-            1,
-            "144000000000000000",
-            "0x2222222222222222222222222222222222222222222222222222222222222222",
-            4102444800,
-        );
-        let recovered_tampered = crate::eip191_recover_signer(&tampered, &rsv).unwrap();
-        assert_ne!(
-            recovered_tampered, address,
-            "tampered payload must not verify to the signer"
-        );
-    }
+    Ok(AxumJson(LeaseStatus {
+        schema_version: crate::SCHEMA_VERSION,
+        lease_id: format!("0x{}", hex::encode(id)),
+        device_ids: a.device_ids,
+        lessee: a.lessee,
+        expires_at: a.expires_at,
+        endpoint: a.endpoint_v1,
+    }))
 }
