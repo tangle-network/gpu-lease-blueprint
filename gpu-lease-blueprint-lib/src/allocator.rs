@@ -133,10 +133,10 @@ impl GpuAllocator {
                     serde_json::from_slice(&bytes).map_err(|_| "invalid allocation journal")?;
                 let mut busy = HashSet::new();
                 for a in saved {
-                    let selected: Vec<&GpuDevice> = allocator
-                        .devices
+                    let selected: Vec<&GpuDevice> = a
+                        .device_ids
                         .iter()
-                        .filter(|d| a.device_ids.contains(&d.id))
+                        .filter_map(|id| allocator.devices.iter().find(|d| d.id == *id))
                         .collect();
                     let endpoint=serde_json::json!({"v":1,"transport":"local-attach","devices":selected.iter().map(|d|d.cuda_ordinal).collect::<Vec<_>>()}).to_string();
                     if a.device_ids.is_empty()
