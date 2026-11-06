@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {Test} from "forge-std/Test.sol";
 import {GpuLeaseBlueprint} from "../src/GpuLeaseBlueprint.sol";
 import {GpuLeaseVault} from "../src/GpuLeaseVault.sol";
+import {GpuLeaseEvidenceVerifier} from "tangle-slashing/contracts/src/GpuLeaseEvidenceVerifier.sol";
 
 /// @title GpuLeaseBlueprint tnt-core integration test — the BSM wiring that
 ///        tnt-core exercises: onJobCall → operator → onJobResult, with the
@@ -33,7 +34,7 @@ contract GpuLeaseBlueprintTest is Test {
 
     function setUp() public {
         vault = new GpuLeaseVault();
-        bsm = new GpuLeaseBlueprint(address(vault), address(0));
+        bsm = new GpuLeaseBlueprint(address(vault), address(new GpuLeaseEvidenceVerifier(makeAddr("collector"))));
         jobLease = bsm.JOB_LEASE();
         jobRelease = bsm.JOB_RELEASE();
         // tnt-core initializes the BSM at blueprint creation.
@@ -210,12 +211,20 @@ contract GpuLeaseBlueprintTest is Test {
         bsm.onJobCall(serviceId, 9, 1, "");
     }
 
-    /// Only tnt-core may call the hooks.
+    /// Only tnt-core may call the job and slashing hooks.
     function test_OnlyFromTangle() public {
-        address rando = address(0x9999);
-        vm.prank(rando);
+        bytes memory offender = abi.encodePacked(operator);
+        vm.startPrank(address(0x9999));
         vm.expectPartialRevert(bytes4(0x065babc6));
         bsm.onJobCall(serviceId, 0, 1, "");
+        vm.expectPartialRevert(bytes4(0x065babc6));
+        bsm.onSlash(serviceId, offender, 10);
+        vm.expectPartialRevert(bytes4(0x065babc6));
+        bsm.onUnappliedSlash(serviceId, offender, 10);
+        vm.stopPrank();
+        vm.prank(tangleCore);
+        bsm.onSlash(serviceId, offender, 10);
+        assertEq(bsm.totalSlashes(operator), 1, "Tangle slash recorded");
     }
 
     /// Full money + routing E2E at the contract level: escrow → bind →

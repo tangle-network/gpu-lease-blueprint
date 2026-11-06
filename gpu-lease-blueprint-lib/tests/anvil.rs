@@ -67,6 +67,7 @@ async fn spawn_harness() -> Result<Option<BlueprintHarness>> {
             .poll_interval(Duration::from_millis(50))
             .with_env_var("GPU_INVENTORY_JSON", GPU_INVENTORY)
             .with_env_var("GPU_QUOTE_SIGNING_KEY", QUOTE_SIGNING_KEY)
+            .with_env_var("GPU_QUOTE_POLICY_JSON", r#"{"base_price_per_second":{"h100":300000000000000},"class_bps":{},"tee_premium_bps":2500,"utilization_curve":[[0,8000],[5000,10000],[10000,12000]],"min_duration_seconds":60,"max_duration_seconds":2592000}"#)
             .spawn()
             .await
         {
@@ -500,12 +501,12 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
                 hasConfig: true,
                 config: TangleBlueprintConfig {
                     membership: MembershipModel::Dynamic,
-                    pricing: PricingModel::EventDriven,
+                    pricing: PricingModel::PayOnce,
                     minOperators: 1,
                     maxOperators: 100,
                     subscriptionRate: U256::ZERO,
                     subscriptionInterval: 0,
-                    eventRate: U256::from(1e15 as u64),
+                    eventRate: U256::ZERO,
                 },
                 metadata: TangleBlueprintMetadata {
                     name: "GPU Lease Blueprint".into(),
@@ -611,7 +612,7 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
         let vault = deploy_vault(&chain, deployer).await?;
         eprintln!("vault deployed at {vault:#x}");
 
-        let price: u128 = 1_000; // wei/s PER DEVICE
+        let price: u128 = 300_000_000_000_000; // wei/s PER DEVICE, the policy's neutral price
         let duration: u64 = 600; // seconds
         // The primary lease rents BOTH devices — the multi-GPU path is the
         // E2E's headline, not an edge case.

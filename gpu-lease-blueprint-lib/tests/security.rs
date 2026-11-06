@@ -115,32 +115,7 @@ async fn reverted_result_frees_reservation<P: Provider>(
         keystore::{Keystore, KeystoreConfig, backends::Backend},
     };
     use futures_util::SinkExt;
-    let receipt = tx(
-        p,
-        owner,
-        Some(vault),
-        Vault::createCall {
-            operator: request_operator(),
-            price: 3,
-            duration: 600,
-            count: 1,
-            intent: request.intentHash,
-            confidentiality: 0,
-            endpoint: Bytes::new(),
-        }
-        .abi_encode(),
-        U256::from(1800),
-    )
-    .await?;
-    request.leaseId = receipt
-        .logs()
-        .iter()
-        .find_map(|l| {
-            Vault::LeaseCreated::decode_log(&l.inner)
-                .ok()
-                .map(|v| v.data.leaseId)
-        })
-        .context("LeaseCreated")?;
+    request.leaseId = create_lease(p, owner, vault, request_operator(), &request).await?;
     let mut results = call(0, request.clone(), owner).await?;
     ensure!(results[0].is_ok(), "funded result reservation failed");
     let keystore = Keystore::new(KeystoreConfig::new().in_memory(true))?;
@@ -180,6 +155,57 @@ async fn reverted_result_frees_reservation<P: Provider>(
         "reverted result leaked hardware reservation"
     );
     Ok(())
+}
+async fn create_lease<P: Provider>(
+    p: &P,
+    owner: Address,
+    vault: Address,
+    operator: Address,
+    r: &GpuLeaseRequest,
+) -> Result<B256> {
+    let receipt = tx(
+        p,
+        owner,
+        Some(vault),
+        Vault::createCall {
+            operator,
+            price: r.pricePerSecond,
+            duration: r.durationSeconds,
+            count: 1,
+            intent: r.intentHash,
+            confidentiality: 0,
+            endpoint: Bytes::new(),
+        }
+        .abi_encode(),
+        U256::from(r.pricePerSecond) * U256::from(r.durationSeconds),
+    )
+    .await?;
+    receipt
+        .logs()
+        .iter()
+        .find_map(|l| {
+            Vault::LeaseCreated::decode_log(&l.inner)
+                .ok()
+                .map(|v| v.data.leaseId)
+        })
+        .context("LeaseCreated")
+}
+async fn deploy<P: Provider>(p: &P, from: Address, name: &str, args: Vec<u8>) -> Result<Address> {
+    let path = format!(
+        "{}/../contracts/out/{name}.sol/{name}.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let artifact: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).context("run forge build")?)?;
+    let object = artifact["bytecode"]["object"]
+        .as_str()
+        .context("missing bytecode")?;
+    let mut code = hex::decode(object.trim_start_matches("0x"))?;
+    code.extend(args);
+    tx(p, from, None, code, U256::ZERO)
+        .await?
+        .contract_address
+        .context(path)
 }
 fn request_operator() -> Address {
     std::env::var("GPU_OPERATOR_ADDRESS")
@@ -247,13 +273,6 @@ async fn restart_reconciles_persisted_lease() -> Result<()> {
 
 #[tokio::test]
 async fn funded_lease_operator_boundaries() -> Result<()> {
-    let Some(artifact_path) = std::env::var_os("GPU_LEASE_TEST_ARTIFACTS") else {
-        eprintln!(
-            "operator chain proof requires GPU_LEASE_TEST_ARTIFACTS from the Forge build; not counted as proof in this invocation"
-        );
-        return Ok(());
-    };
-    let artifacts: serde_json::Value = serde_json::from_slice(&std::fs::read(artifact_path)?)?;
     let port = std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?
         .port();
@@ -279,29 +298,15 @@ async fn funded_lease_operator_boundaries() -> Result<()> {
     let owner = accounts[1];
     let operator = accounts[2];
     let attacker = accounts[3];
-    let bytes = |source: &str, name: &str| -> Result<Vec<u8>> {
-        Ok(hex::decode(
-            artifacts["contracts"][source][name]["evm"]["bytecode"]["object"]
-                .as_str()
-                .context("missing bytecode")?,
-        )?)
-    };
-    let vault = tx(
+    let vault = deploy(&p, core, "GpuLeaseVault", vec![]).await?;
+    let verifier = deploy(&p, core, "GpuLeaseEvidenceVerifier", core.abi_encode()).await?;
+    let bsm = deploy(
         &p,
         core,
-        None,
-        bytes("contracts/src/GpuLeaseVault.sol", "GpuLeaseVault")?,
-        U256::ZERO,
+        "GpuLeaseBlueprint",
+        (vault, verifier).abi_encode(),
     )
-    .await?
-    .contract_address
-    .context("vault deployment")?;
-    let mut code = bytes("contracts/src/GpuLeaseBlueprint.sol", "GpuLeaseBlueprint")?;
-    code.extend((vault, Address::ZERO).abi_encode());
-    let bsm = tx(&p, core, None, code, U256::ZERO)
-        .await?
-        .contract_address
-        .context("BSM deployment")?;
+    .await?;
     tx(
         &p,
         core,
@@ -326,6 +331,15 @@ async fn funded_lease_operator_boundaries() -> Result<()> {
             (
                 "GPU_INVENTORY_JSON",
                 r#"[{"id":"d0","gpu_class":"h100","tee":false,"cuda_ordinal":0}]"#.into(),
+            ),
+            (
+                "GPU_QUOTE_POLICY_JSON",
+                serde_json::to_string(&gpu_lease_blueprint_lib::QuotePolicy {
+                    base_price_per_second: [("h100".into(), 3)].into(),
+                    utilization_curve: vec![(0, 10_000), (10_000, 12_000)],
+                    max_duration_seconds: 3_600,
+                    ..Default::default()
+                })?,
             ),
         ] {
             std::env::set_var(key, value);
@@ -354,32 +368,21 @@ async fn funded_lease_operator_boundaries() -> Result<()> {
         gpu_lease_blueprint_lib::allocator().idle_count("h100", false) == 1,
         "fake lease reserved hardware"
     );
-    let receipt = tx(
-        &p,
-        owner,
-        Some(vault),
-        Vault::createCall {
-            operator,
-            price: 3,
-            duration: 600,
-            count: 1,
-            intent: r.intentHash,
-            confidentiality: 0,
-            endpoint: Bytes::new(),
-        }
-        .abi_encode(),
-        U256::from(1800),
-    )
-    .await?;
-    r.leaseId = receipt
-        .logs()
-        .iter()
-        .find_map(|l| {
-            Vault::LeaseCreated::decode_log(&l.inner)
-                .ok()
-                .map(|v| v.data.leaseId)
-        })
-        .context("LeaseCreated")?;
+    // A funded lease below the operator's idle quote or outside its duration bounds reserves nothing.
+    for (price, duration) in [(2, 600), (3, 7_200)] {
+        let mut outside = r.clone();
+        outside.pricePerSecond = price;
+        outside.durationSeconds = duration;
+        outside.intentHash =
+            gpu_lease_blueprint_lib::jobs::intent_hash(2, "h100", duration, 0, "any", 1).into();
+        outside.leaseId = create_lease(&p, owner, vault, operator, &outside).await?;
+        ensure!(
+            rejected(&call(0, outside, owner).await?)
+                && gpu_lease_blueprint_lib::allocator().idle_count("h100", false) == 1,
+            "lease at {price} wei/s for {duration}s outside operator policy reserved hardware"
+        );
+    }
+    r.leaseId = create_lease(&p, owner, vault, operator, &r).await?;
     tx(
         &p,
         core,
