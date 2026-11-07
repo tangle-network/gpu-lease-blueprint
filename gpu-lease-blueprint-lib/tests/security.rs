@@ -457,6 +457,7 @@ async fn funded_lease_operator_boundaries() -> Result<()> {
         http("GET", &uri, serde_json::Value::Null, None).await?.0 == 401,
         "GPU access bypasses credentials"
     );
+    ensure!(http("POST", "/api/session/challenge", serde_json::json!({"leaseId":format!("{:#x}",r.leaseId),"lessee":format!("{attacker:#x}")}), None).await?.0 == 403, "nonowner received a challenge");
     let (status, challenge) = http(
         "POST",
         "/api/session/challenge",
@@ -480,6 +481,17 @@ async fn funded_lease_operator_boundaries() -> Result<()> {
     )
     .await?;
     ensure!(status == 200, "verification failed: {credential}");
+    ensure!(
+        http(
+            "POST",
+            "/api/session/verify",
+            serde_json::json!({"nonce":challenge["nonce"],"signature":signature}),
+            None
+        )
+        .await?
+        .0 == 401,
+        "challenge replay issued a credential"
+    );
     let token = credential["token"].as_str().context("token")?;
     ensure!(
         http("GET", &uri, serde_json::Value::Null, Some(token))

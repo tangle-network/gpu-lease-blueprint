@@ -21,20 +21,19 @@ Only the authorized BSM or slashing contract may invoke the slashing hook.
 
 ## Devices and access
 
-The allocator schedules operator-owned hardware and persists active leases across
-restart, preserving device identity, endpoint and expiry. Inventory comes from SDK
-detection, with each device bound to a signed device attestation. GPU identifiers
-come from the released SDK catalog; VRAM per GPU is expressed in decimal GB.
-TEE detection and confidentiality types come from the SDK.
+The allocator persists active leases across restart, preserving device identity,
+endpoint and expiry. `GPU_INVENTORY_JSON` is UNVERIFIED operator input. SDK hardware
+detection and signed device attestation remain held for Drew's trust-root decision;
+no GPU verifier or signer is configured. GPU identifiers and TEE types use the SDK.
 
 Cloud capacity uses the SDK's allocation and termination lifecycle. Provider
 adapters belong to the SDK.
 
-Job results contain public endpoints and lease identifiers. Lease credentials stay
-off-chain. Blueprint-auth supplies EIP-191 recovery and tokens scoped to a lease
-with expiry; its owner predicate checks the lease owner. That predicate replaces
-the local `LeaseAuth` implementation when released. Invalid configuration fails at
-startup.
+Job results contain public endpoints and lease identifiers; credentials stay
+off-chain. Access uses blueprint-auth's domain-bound owner sessions, with funded
+lease ownership and expiry checked on every access. Maintained SDK publication
+and a companion client validator are adoption preconditions; a local dependency
+patch proves source integration only. Invalid configuration fails at startup.
 
 ## Registration and consumer proof
 

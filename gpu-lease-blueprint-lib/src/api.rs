@@ -21,34 +21,35 @@ use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::allocator::{Allocation, GpuAllocator};
+use crate::allocator::GpuAllocator;
 use crate::chain::ChainConfig;
 use crate::quote::{QuoteInputs, QuotePolicy, QuoteValidationError};
 use blueprint_sdk::alloy::{
-    primitives::Signature,
+    primitives::Address,
+    providers::{Provider, ProviderBuilder},
     signers::{Signer, local::PrivateKeySigner},
 };
 use blueprint_sdk::auth::{
-    generate_challenge, paseto_tokens::PasetoTokenManager, types::ServiceId,
+    owner::{
+        OwnerAuthError, OwnerDomain, OwnerGrant, OwnerPredicate, ResourceScope, ScopedOwnerAuth,
+    },
+    paseto_tokens::PasetoTokenManager,
+    types::ServiceId,
 };
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Mutex,
-    time::Duration,
-};
+use std::time::Duration;
 
 /// Operator inventory and SDK authentication state shared by its HTTP routes.
 #[derive(Clone)]
 pub struct ApiState {
     pub allocator: Arc<GpuAllocator>,
-    pub auth: Arc<LeaseAuth>,
+    pub auth: Arc<OwnerSessions>,
 }
 
 impl ApiState {
     /// Product path: the process globals (`Arc` around the statics' refs).
     pub fn from_globals() -> Self {
-        static AUTH: once_cell::sync::Lazy<Arc<LeaseAuth>> =
-            once_cell::sync::Lazy::new(|| Arc::new(LeaseAuth::new()));
+        static AUTH: once_cell::sync::Lazy<Arc<OwnerSessions>> =
+            once_cell::sync::Lazy::new(|| Arc::new(OwnerSessions::new()));
         Self {
             allocator: crate::allocator(),
             auth: Arc::clone(&AUTH),
@@ -153,24 +154,122 @@ pub fn quote_signer() -> Result<PrivateKeySigner, String> {
         .map_err(|_| "invalid GPU_QUOTE_SIGNING_KEY".to_string())
 }
 
-pub struct LeaseAuth {
-    manager: PasetoTokenManager,
-    challenges: Mutex<HashMap<[u8; 32], Challenge>>,
+/// Lazy SDK owner sessions; the process validates their chain domain at startup.
+pub type OwnerSessions = tokio::sync::OnceCell<ScopedOwnerAuth<LeaseOwner>>;
+
+/// The application supplies funded ownership; SDK auth owns the credential protocol.
+pub struct LeaseOwner {
+    allocator: Arc<GpuAllocator>,
+    chain: ChainConfig,
+    chain_id: u64,
 }
-#[derive(Clone)]
-struct Challenge {
-    lease: [u8; 32],
-    lessee: String,
-    message: String,
-    expiry: u64,
-}
-impl LeaseAuth {
-    pub fn new() -> Self {
-        Self {
-            manager: PasetoTokenManager::new(Duration::from_secs(300)),
-            challenges: Mutex::new(HashMap::new()),
+
+impl OwnerPredicate for LeaseOwner {
+    async fn authorize(
+        &self,
+        scope: &ResourceScope,
+        owner: &[u8; 20],
+    ) -> Result<OwnerGrant, OwnerAuthError> {
+        if scope.service_id != ServiceId::new(0) {
+            return Err(OwnerAuthError::Unauthorized);
         }
+        let id = hex::decode(&scope.resource)
+            .ok()
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or(OwnerAuthError::InvalidRequest)?;
+        let allocation = self
+            .allocator
+            .allocation(id)
+            .ok_or(OwnerAuthError::Unauthorized)?;
+        let lease = self
+            .chain
+            .lease(id)
+            .await
+            .map_err(|_| OwnerAuthError::Unavailable)?;
+        if lease.chain_id != self.chain_id
+            || lease.require_allocation(&allocation).is_err()
+            || allocation.expires_at <= crate::allocator::unix_now()
+            || !self.allocator.allocation(id).is_some_and(|current| {
+                current.device_ids == allocation.device_ids
+                    && current.expires_at == allocation.expires_at
+            })
+            || allocation
+                .lessee
+                .parse::<Address>()
+                .ok()
+                .map(|address| address.into_array())
+                != Some(*owner)
+        {
+            return Err(OwnerAuthError::Unauthorized);
+        }
+        Ok(OwnerGrant {
+            expires_at: allocation.expires_at,
+            scopes: vec!["gpu:attach".into(), "gpu:exec".into()],
+        })
     }
+}
+
+fn resource_scope(id: [u8; 32]) -> ResourceScope {
+    ResourceScope {
+        service_id: ServiceId::new(0),
+        resource: hex::encode(id),
+    }
+}
+
+fn auth_error(error: OwnerAuthError) -> (StatusCode, AxumJson<ApiError>) {
+    let status = match error {
+        OwnerAuthError::InvalidRequest => StatusCode::BAD_REQUEST,
+        OwnerAuthError::InvalidChallenge | OwnerAuthError::InvalidSignature => {
+            StatusCode::UNAUTHORIZED
+        }
+        OwnerAuthError::Unauthorized => StatusCode::FORBIDDEN,
+        OwnerAuthError::Capacity => StatusCode::TOO_MANY_REQUESTS,
+        OwnerAuthError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    err(status, error.to_string())
+}
+
+async fn owner_auth(
+    state: &ApiState,
+) -> Result<&ScopedOwnerAuth<LeaseOwner>, (StatusCode, AxumJson<ApiError>)> {
+    state
+        .auth
+        .get_or_try_init(|| async {
+            let chain =
+                ChainConfig::from_env().map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, e))?;
+            let provider = ProviderBuilder::new()
+                .connect(&chain.rpc)
+                .await
+                .map_err(|_| auth_error(OwnerAuthError::Unavailable))?;
+            let chain_id = provider
+                .get_chain_id()
+                .await
+                .map_err(|_| auth_error(OwnerAuthError::Unavailable))?;
+            let domain = OwnerDomain {
+                audience: format!("gpu-lease:{:#x}", chain.blueprint),
+                chain_id: Some(chain_id),
+                operator: Some(chain.operator.into_array()),
+                contract: Some(chain.vault.into_array()),
+            };
+            ScopedOwnerAuth::with_owner(
+                PasetoTokenManager::new(Duration::from_secs(300)),
+                domain,
+                LeaseOwner {
+                    allocator: Arc::clone(&state.allocator),
+                    chain,
+                    chain_id,
+                },
+            )
+            .map_err(auth_error)
+        })
+        .await
+}
+
+pub async fn initialize_auth() -> Result<(), String> {
+    owner_auth(&ApiState::from_globals())
+        .await
+        .map(|_| ())
+        .map_err(|(_, error)| error.0.error)
 }
 
 /// Public lease status — endpoint descriptor + session facts. NEVER contains
@@ -383,7 +482,7 @@ async fn lease_status(
     Path(lease_id): Path<String>,
 ) -> ApiResult<LeaseStatus> {
     let id = parse_lease_id(&lease_id)?;
-    let alloc: Allocation = state
+    let alloc = state
         .allocator
         .allocation(id)
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown or settled lease"))?;
@@ -397,75 +496,24 @@ async fn lease_status(
     }))
 }
 
-async fn funded_allocation(
-    state: &ApiState,
-    id: [u8; 32],
-) -> Result<Allocation, (StatusCode, AxumJson<ApiError>)> {
-    let a = state
-        .allocator
-        .allocation(id)
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "unknown or settled lease"))?;
-    let lease = ChainConfig::from_env()
-        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, e))?
-        .lease(id)
-        .await
-        .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, e))?;
-    lease
-        .require_allocation(&a)
-        .map_err(|e| err(StatusCode::FORBIDDEN, e))?;
-    if !state.allocator.allocation(id).is_some_and(|current| {
-        current.device_ids == a.device_ids && current.expires_at == a.expires_at
-    }) {
-        return Err(err(
-            StatusCode::FORBIDDEN,
-            "lease changed during authorization",
-        ));
-    }
-    if a.expires_at <= crate::allocator::unix_now() {
-        return Err(err(StatusCode::FORBIDDEN, "lease expired"));
-    }
-    Ok(a)
-}
-
 async fn session_challenge(
     State(state): State<ApiState>,
     AxumJson(req): AxumJson<ChallengeRequest>,
 ) -> ApiResult<ChallengeResponse> {
     let id = parse_lease_id(&req.lease_id)?;
-    let a = funded_allocation(&state, id).await?;
-    if !a.lessee.eq_ignore_ascii_case(&req.lessee) {
-        return Err(err(StatusCode::FORBIDDEN, "not the lease's lessee"));
-    }
-    let now = crate::allocator::unix_now();
-    let expiry = a.expires_at.min(now.saturating_add(300));
-    let nonce = generate_challenge(&mut blueprint_sdk::std::BlueprintRng::new());
-    let message = format!(
-        "GPU lease access\nlease: 0x{}\nnonce: 0x{}\nexpires: {}",
-        hex::encode(id),
-        hex::encode(nonce),
-        expiry
-    );
-    let mut challenges = state.auth.challenges.lock().unwrap();
-    challenges.retain(|_, c| c.expiry > now);
-    if challenges.len() >= 4096 {
-        return Err(err(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too many pending challenges",
-        ));
-    }
-    challenges.insert(
-        nonce,
-        Challenge {
-            lease: id,
-            lessee: a.lessee,
-            message: message.clone(),
-            expiry,
-        },
-    );
+    let lessee: Address = req
+        .lessee
+        .parse()
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "invalid lessee"))?;
+    let challenge = owner_auth(&state)
+        .await?
+        .challenge(resource_scope(id), lessee.into_array())
+        .await
+        .map_err(auth_error)?;
     Ok(AxumJson(ChallengeResponse {
-        nonce: format!("0x{}", hex::encode(nonce)),
-        message,
-        expires_at: expiry,
+        nonce: format!("0x{}", hex::encode(challenge.nonce)),
+        message: challenge.message,
+        expires_at: challenge.expires_at,
     }))
 }
 
@@ -474,59 +522,18 @@ async fn session_verify(
     AxumJson(req): AxumJson<VerifyRequest>,
 ) -> ApiResult<VerifyResponse> {
     let nonce = parse_lease_id(&req.nonce)?;
-    let challenge = state
-        .auth
-        .challenges
-        .lock()
-        .unwrap()
-        .get(&nonce)
-        .cloned()
-        .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "unknown challenge"))?;
-    let a = funded_allocation(&state, challenge.lease).await?;
-    let now = crate::allocator::unix_now();
-    if challenge.expiry <= now {
-        return Err(err(StatusCode::UNAUTHORIZED, "challenge expired"));
-    }
-    let signature: Signature = req
-        .signature
-        .parse()
+    let signature = hex::decode(req.signature.trim_start_matches("0x"))
         .map_err(|_| err(StatusCode::UNAUTHORIZED, "invalid signature"))?;
-    let recovered = signature
-        .recover_address_from_msg(&challenge.message)
-        .map_err(|_| err(StatusCode::UNAUTHORIZED, "signature recovery failed"))?;
-    if !format!("{recovered:#x}").eq_ignore_ascii_case(&challenge.lessee)
-        || !a.lessee.eq_ignore_ascii_case(&challenge.lessee)
-    {
-        return Err(err(StatusCode::UNAUTHORIZED, "signer is not lessee"));
-    }
-    if state
-        .auth
-        .challenges
-        .lock()
-        .unwrap()
-        .remove(&nonce)
-        .is_none()
-    {
-        return Err(err(StatusCode::UNAUTHORIZED, "challenge already consumed"));
-    }
-    let scopes = vec!["gpu:attach".into(), "gpu:exec".into()];
-    let token = state
-        .auth
-        .manager
-        .generate_token(
-            ServiceId::new(0),
-            hex::encode(challenge.lease),
-            Some(challenge.lessee),
-            BTreeMap::new(),
-            Some(Duration::from_secs(a.expires_at.saturating_sub(now))),
-            Some(scopes.clone()),
-        )
-        .map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "token issuance failed"))?;
+    let session = owner_auth(&state)
+        .await?
+        .verify(&nonce, &signature)
+        .await
+        .map_err(auth_error)?;
     Ok(AxumJson(VerifyResponse {
-        token,
-        lease_id: format!("0x{}", hex::encode(challenge.lease)),
-        scopes,
-        expires_at: a.expires_at,
+        token: session.token,
+        lease_id: format!("0x{}", session.resource.resource),
+        scopes: session.scopes,
+        expires_at: session.expires_at,
     }))
 }
 
@@ -541,33 +548,10 @@ async fn lease_access(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "bearer credential required"))?;
-    let claims = state
-        .auth
-        .manager
-        .validate_token(token)
-        .map_err(|_| err(StatusCode::UNAUTHORIZED, "invalid or expired credential"))?;
-    if claims.key_id != hex::encode(id)
-        || claims.service_id != ServiceId::new(0)
-        || !claims
-            .scopes
-            .as_ref()
-            .is_some_and(|s| s.iter().any(|s| s == "gpu:attach"))
-    {
-        return Err(err(
-            StatusCode::FORBIDDEN,
-            "credential does not authorize this lease",
-        ));
-    }
-    let a = funded_allocation(&state, id).await?;
-    if claims.tenant_id.as_deref() != Some(a.lessee.as_str()) {
-        return Err(err(StatusCode::FORBIDDEN, "credential owner mismatch"));
-    }
-    Ok(AxumJson(LeaseStatus {
-        schema_version: crate::SCHEMA_VERSION,
-        lease_id: format!("0x{}", hex::encode(id)),
-        device_ids: a.device_ids,
-        lessee: a.lessee,
-        expires_at: a.expires_at,
-        endpoint: a.endpoint_v1,
-    }))
+    owner_auth(&state)
+        .await?
+        .authorize(token, &resource_scope(id), "gpu:attach")
+        .await
+        .map_err(auth_error)?;
+    lease_status(State(state), Path(hex::encode(id))).await
 }
