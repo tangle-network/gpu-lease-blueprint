@@ -25,6 +25,7 @@ The allocator persists leases across restart, preserving device identity, endpoi
 and expiry. `GPU_INVENTORY_JSON` is UNVERIFIED operator input. Signed device
 attestation awaits Drew's trust-root decision; no GPU verifier or signer is
 configured. TEE types come from the SDK.
+GPU class ids and decimal GB per GPU follow the released SDK catalog.
 
 Cloud capacity uses the SDK's allocation and termination lifecycle. Provider
 adapters belong to the SDK.
