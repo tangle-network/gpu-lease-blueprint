@@ -4231,7 +4231,10 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "blueprint-sdk",
+ "chrono",
  "gpu-lease-blueprint-lib",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing-subscriber 0.3.23",
 ]
@@ -4262,6 +4265,7 @@ dependencies = [
  "base64 0.22.1",
  "blueprint-anvil-testing-utils",
  "blueprint-sdk",
+ "chrono",
  "fs2",
  "futures-util",
  "hex",
