@@ -6,7 +6,6 @@ use blueprint_sdk::{
     alloy::{
         primitives::{Address, B256, Bytes, U256, keccak256},
         providers::{Provider, ProviderBuilder},
-        rpc::types::TransactionRequest,
         sol,
         sol_types::{SolCall, SolEvent, SolValue},
     },
@@ -19,6 +18,9 @@ use std::{
     time::Duration,
 };
 use tower::ServiceExt;
+#[path = "../../tests/support/chain.rs"]
+mod chain_fixture;
+use chain_fixture::{deploy, tx};
 
 sol! {
     interface Vault {
@@ -82,23 +84,6 @@ async fn http(
     let status = response.status().as_u16();
     let bytes = axum::body::to_bytes(response.into_body(), 1_000_000).await?;
     Ok((status, serde_json::from_slice(&bytes)?))
-}
-
-async fn tx<P: Provider>(
-    p: &P,
-    from: Address,
-    to: Option<Address>,
-    input: Vec<u8>,
-    value: U256,
-) -> Result<blueprint_sdk::alloy::rpc::types::TransactionReceipt> {
-    let mut request = TransactionRequest::default();
-    request.from = Some(from);
-    request.input = Bytes::from(input).into();
-    request.value = Some(value);
-    request.to = to.map(blueprint_sdk::alloy::primitives::TxKind::Call);
-    let r = p.send_transaction(request).await?.get_receipt().await?;
-    ensure!(r.status(), "transaction reverted");
-    Ok(r)
 }
 
 async fn reverted_result_frees_reservation<P: Provider>(
@@ -189,23 +174,6 @@ async fn create_lease<P: Provider>(
                 .map(|v| v.data.leaseId)
         })
         .context("LeaseCreated")
-}
-async fn deploy<P: Provider>(p: &P, from: Address, name: &str, args: Vec<u8>) -> Result<Address> {
-    let path = format!(
-        "{}/../contracts/out/{name}.sol/{name}.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let artifact: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).context("run forge build")?)?;
-    let object = artifact["bytecode"]["object"]
-        .as_str()
-        .context("missing bytecode")?;
-    let mut code = hex::decode(object.trim_start_matches("0x"))?;
-    code.extend(args);
-    tx(p, from, None, code, U256::ZERO)
-        .await?
-        .contract_address
-        .context(path)
 }
 fn request_operator() -> Address {
     std::env::var("GPU_OPERATOR_ADDRESS")

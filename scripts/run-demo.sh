@@ -1,22 +1,10 @@
 #!/usr/bin/env bash
-# run-demo.sh — LOCAL DEMO: the TypeScript gpuLease resolver (from the
-# agent-dev-container SDK worktree) driving the REAL gpu-lease-blueprint
-# stack (anvil + tnt-core + operator + vault), end to end.
-#
-# The merge gate: this demo must be green before the SDK PR merges.
-#
-# Requirements:
-#   - Docker (colima) — same as run-e2e.sh
-#   - forge build                (vault artifact)
-#   - the SDK worktree installed at ../agent-dev-container-gpu-lease
-#     (override with DEMO_SDK_DIR)
+# Real local chain → generated GPU BSM registration → operator → Sandbox SDK.
+# Run on a governed Beelink gate; the funded flow must pass before release.
+# Requires native Anvil, Forge, cargo-tangle, corepack and installed SDK dependencies.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  export DOCKER_HOST="${DOCKER_HOST:-unix://$HOME/.colima/default/docker.sock}"
-fi
-mkdir -p .tmp-e2e
-export TMPDIR="$PWD/.tmp-e2e"
-
-exec cargo test -p gpu-lease-blueprint-lib --test demo -- --nocapture
+: "${DEMO_SDK_DIR:?set the updated Sandbox SDK checkout}"
+forge build
+cargo build -p gpu-lease-blueprint-bin -p gpu-lease-blueprint-gen
+exec cargo test -p gpu-lease-blueprint-lib --test demo -- --nocapture --test-threads=1
