@@ -28,6 +28,41 @@ fn setup_log() {
 async fn main() -> Result<(), blueprint_sdk::Error> {
     setup_log();
 
+    if let Some(mode) = std::env::var_os("GPU_CLOUD_CAPACITY") {
+        if mode != "1" {
+            return Err(blueprint_sdk::Error::Other(
+                "GPU_CLOUD_CAPACITY must be 1 when set".into(),
+            ));
+        }
+        #[cfg(all(feature = "cloud", unix))]
+        {
+            use tokio::io::AsyncReadExt;
+            let mut interrupt =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .map_err(|_| blueprint_sdk::Error::Other("cloud signal setup failed".into()))?;
+            let mut terminate =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .map_err(|_| blueprint_sdk::Error::Other("cloud signal setup failed".into()))?;
+            let mut bytes = Vec::new();
+            tokio::io::stdin()
+                .take(gpu_lease_blueprint_lib::cloud::MAX_CONFIG_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .await
+                .map_err(|_| {
+                    blueprint_sdk::Error::Other("cloud configuration read failed".into())
+                })?;
+            return gpu_lease_blueprint_lib::cloud::run(&bytes, async {
+                tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} }
+            })
+            .await
+            .map_err(blueprint_sdk::Error::Other);
+        }
+        #[cfg(not(all(feature = "cloud", unix)))]
+        return Err(blueprint_sdk::Error::Other(
+            "cloud feature on Unix is required".into(),
+        ));
+    }
+
     gpu_lease_blueprint_lib::initialize()
         .await
         .map_err(blueprint_sdk::Error::Other)?;

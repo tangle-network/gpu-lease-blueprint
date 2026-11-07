@@ -6,6 +6,9 @@ authors.workspace = true
 description.workspace = true
 license.workspace = true
 
+[features]
+cloud = ["gpu-lease-blueprint-lib/cloud", "tokio/io-std", "tokio/io-util", "tokio/signal"]
+
 [[bin]]
 name = "gpu-lease-blueprint"
 path = "src/main.rs"
@@ -16,3 +19,9 @@ axum = "0.8"
 blueprint-sdk = { workspace = true, features = ["std", "tangle"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+chrono = { workspace = true }
+serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["process", "io-util", "time"] }
