@@ -131,8 +131,9 @@ async fn http(
         }
     };
     if hold {
+        let released = peer.release.notified();
         peer.created.notify_one();
-        peer.release.notified().await;
+        released.await;
     }
     if hold_list {
         peer.listed.notify_one();
@@ -151,6 +152,10 @@ impl Drop for Server {
     }
 }
 impl Server {
+    fn release_post(&self) {
+        self.peer.native.lock().unwrap().hold_post = false;
+        self.peer.release.notify_waiters();
+    }
     async fn start() -> Self {
         let peer = Peer {
             native: Arc::new(Mutex::new(Native::default())),
@@ -299,8 +304,7 @@ async fn cloud_binary_propagates_eight_b200_and_recovers_without_new_stock() {
         .clone();
     first.start_kill().unwrap();
     first.wait().await.unwrap();
-    server.peer.release.notify_one();
-    server.peer.native.lock().unwrap().hold_post = false;
+    server.release_post();
     // Treat SDK authority as opaque durable state; native tags cannot repair it.
     let authority = Path::new(config["state_dir"].as_str().unwrap())
         .join("blueprint/lease-authorizations.json");
@@ -534,8 +538,7 @@ async fn store_lock_serializes_different_identities_and_interrupt_is_armed_befor
         .await
         .unwrap();
     signal(&child, "-INT").await;
-    server.peer.release.notify_one();
-    server.peer.native.lock().unwrap().hold_post = false;
+    server.release_post();
     exited(&mut child, true).await;
     assert_eq!(phase(&config), json!("Retired"));
     assert!(server.peer.native.lock().unwrap().pods.is_empty());
@@ -553,8 +556,7 @@ async fn post_create_journal_failure_and_one_failed_account_do_not_suppress_clea
         .unwrap();
     let pending = Path::new(config["state_dir"].as_str().unwrap()).join("capacity.pending");
     std::fs::create_dir(&pending).unwrap();
-    server.peer.release.notify_one();
-    server.peer.native.lock().unwrap().hold_post = false;
+    server.release_post();
     assert!(
         exited(&mut child, false)
             .await
@@ -583,10 +585,9 @@ async fn post_create_journal_failure_and_one_failed_account_do_not_suppress_clea
         .unwrap();
     child.start_kill().unwrap();
     child.wait().await.unwrap();
-    server.peer.release.notify_one();
+    server.release_post();
     {
         let mut native = server.peer.native.lock().unwrap();
-        native.hold_post = false;
         native.lambda_error = true;
     }
     let mut retry = launch(&config).await;
@@ -626,8 +627,7 @@ async fn post_create_journal_failure_and_one_failed_account_do_not_suppress_clea
         (end - chrono::Utc::now()).to_std().unwrap_or_default() + Duration::from_millis(20),
     )
     .await;
-    server.peer.release.notify_one();
-    server.peer.native.lock().unwrap().hold_post = false;
+    server.release_post();
     exited(&mut child, false).await;
     assert!(server.peer.native.lock().unwrap().pods.is_empty());
     assert_eq!(phase(&config), json!("Retired"));
