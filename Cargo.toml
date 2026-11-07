@@ -14,8 +14,8 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 anyhow = "1"
-blueprint-sdk = { version = "=0.2.0-alpha.21", default-features = false }
-blueprint-chain-setup-anvil = { version = "=0.2.0-alpha.24" }
+blueprint-sdk = { version = "=0.2.0", default-features = false }
+blueprint-chain-setup-anvil = { version = "=0.2.0" }
 sha2 = "0.10"
 tempfile = "3"
 
