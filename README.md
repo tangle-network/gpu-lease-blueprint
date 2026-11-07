@@ -5,8 +5,7 @@ Escrowed, per-second leases of operator-owned GPUs on Tangle. The
 drives quoting, escrow, operator jobs, access and release.
 
 [SPEC.md](./SPEC.md) owns D8. The allocator serves operator hardware; cloud capacity uses the SDK.
-The [ADC update](https://github.com/tangle-network/agent-container/pull/17186), complete lease
-lifecycle proof and held contract review remain pending.
+`GPU_INVENTORY_JSON` is UNVERIFIED operator input; attestation awaits Drew's trust-root decision.
 
 ## Build and verify
 

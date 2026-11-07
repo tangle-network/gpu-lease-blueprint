@@ -39,6 +39,7 @@ pub fn tee_from_wire(value: u8) -> Result<Option<TeeProvider>, AllocatorError> {
     }
 }
 
+/// UNVERIFIED operator input; these fields are not signed device attestation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GpuDevice {
