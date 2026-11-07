@@ -301,6 +301,28 @@ async fn cloud_binary_propagates_eight_b200_and_recovers_without_new_stock() {
     first.wait().await.unwrap();
     server.peer.release.notify_one();
     server.peer.native.lock().unwrap().hold_post = false;
+    // Treat SDK authority as opaque durable state; native tags cannot repair it.
+    let authority = Path::new(config["state_dir"].as_str().unwrap())
+        .join("blueprint/lease-authorizations.json");
+    let original_authority = std::fs::read(&authority).unwrap();
+    assert!(!String::from_utf8_lossy(&original_authority).contains(KEY));
+    for corrupt in [true, false] {
+        if corrupt {
+            std::fs::write(&authority, "invalid SDK authority").unwrap();
+        } else {
+            std::fs::remove_file(&authority).unwrap();
+        }
+        let mut refused = launch(&config).await;
+        assert!(
+            exited(&mut refused, false)
+                .await
+                .contains("cloud authorization context")
+        );
+        assert_eq!(phase(&config), json!("Attempted"));
+        assert_eq!(server.peer.native.lock().unwrap().posts.len(), 1);
+    }
+    std::fs::write(&authority, original_authority).unwrap();
+    std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o600)).unwrap();
     let mut restarted = launch(&config).await;
     let live = receipt(&mut restarted).await;
     assert_eq!(live["gpu_count"], 8);
@@ -426,6 +448,10 @@ async fn deadline_and_failed_retirement_stay_durable_without_rerenting() {
     let mut rotated = config.clone();
     rotated["credentials"][0]["api_key"] = json!("rotated-same-account-credential");
     let mut child = launch(&rotated).await;
+    exited(&mut child, false).await;
+    assert_eq!(phase(&config), json!("Retiring"));
+    assert_eq!(server.peer.native.lock().unwrap().posts.len(), count);
+    let mut child = launch(&config).await;
     exited(&mut child, true).await;
     assert_eq!(phase(&config), json!("Retired"));
     assert_eq!(server.peer.native.lock().unwrap().posts.len(), count);

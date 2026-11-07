@@ -390,6 +390,14 @@ pub async fn run(bytes: &[u8], shutdown: impl Future<Output = ()>) -> Result<()>
     if record.phase == Phase::Retired {
         return Ok(());
     }
+    let provisioner = if first_attempt {
+        provisioner
+            .initialize_lease_state_dir(&config.state_dir)
+            .await
+    } else {
+        provisioner.with_lease_state_dir(&config.state_dir)
+    }
+    .map_err(|e| operation("authorization context", e))?;
     if record.phase == Phase::Retiring {
         return retire(&provisioner, &path, &mut record, &current_accounts).await;
     }

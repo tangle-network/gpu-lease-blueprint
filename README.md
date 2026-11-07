@@ -23,8 +23,9 @@ The lib Anvil suite needs Docker; registration uses native Anvil, the CLI and bu
 ## Cloud capacity deployment (pending SDK release)
 
 The opt-in `cloud` feature deploys a caller-selected workload through the SDK;
-it needs a published SDK containing `lock_lease` and `recover_lease`. The current
-dependency pin does not contain these APIs. Source-override checks are interim proof.
+it needs a published SDK containing `lock_lease`, `recover_lease` and the initialize/open
+lease-state context APIs. The current dependency pin does not contain these APIs.
+Source-override checks are interim proof.
 
 After adopting that release, build the existing operator binary with `--features cloud`:
 
@@ -41,6 +42,8 @@ Keep the corresponding private key with the caller. Provider credentials stay on
 workload configuration is explicit and never inherits the launcher's environment.
 
 Use a dedicated, initially empty private state directory and retain it for recovery.
+Only the first fresh attempt initializes SDK authority; restarts open it without repair.
+Preserve the SDK's private original quote/deadline authorization alongside the caller journal.
 The public receipt contains SDK connection facts after bounded status/readiness checks.
 These are provider observations, not hardware attestation or proof of image execution.
 Ctrl-C/SIGTERM retires capacity through the SDK and waits for absence; deadline retirement
