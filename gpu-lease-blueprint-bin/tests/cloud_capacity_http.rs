@@ -108,7 +108,7 @@ async fn http(
                 if state.first_list_primary.is_none() {
                     state.first_list_primary = Some(token == format!("Bearer {KEY}"));
                 }
-                Json(json!({"pods":if other_account {vec![]}else{state.pods.values().cloned().collect::<Vec<_>>()}})).into_response()
+                Json(json!({"pods":if other_account {vec![]}else{state.pods.values().cloned().collect::<Vec<_>>()},"pagination":{"hasNextPage":false}})).into_response()
             }
             ("GET", path) => {
                 if other_account {
