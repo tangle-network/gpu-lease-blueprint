@@ -4,6 +4,7 @@ use blueprint_sdk::{
         primitives::{Address, U256},
         providers::{Provider, ProviderBuilder, ext::AnvilApi},
         sol_types::SolValue,
+        transports::http::reqwest::Url,
     },
     clients::tangle::{TangleClientConfig, TangleSettings, contracts::ITangleBlueprints},
     keystore::{Keystore, KeystoreConfig, backends::ecdsa::EcdsaBackend},
@@ -92,8 +93,8 @@ pub struct Registered {
 impl Registered {
     pub fn client_config(&self, keystore: &Path) -> Result<TangleClientConfig> {
         Ok(TangleClientConfig::new(
-            self.http.parse()?,
-            self.http.replace("http://", "ws://").parse()?,
+            self.http.parse::<Url>()?,
+            self.http.replace("http://", "ws://").parse::<Url>()?,
             keystore.display().to_string(),
             TangleSettings {
                 blueprint_id: self.id,
