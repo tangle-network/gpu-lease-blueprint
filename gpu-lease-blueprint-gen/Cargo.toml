@@ -20,7 +20,7 @@ same-file = "1"
 
 [dev-dependencies]
 hex = "0.4"
-blueprint-chain-setup-anvil = { version = "=0.2.0-alpha.24" }
+blueprint-chain-setup-anvil = { workspace = true }
 sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
