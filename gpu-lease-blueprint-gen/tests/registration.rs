@@ -239,12 +239,13 @@ async fn cargo_tangle_registers_generated_definition() -> Result {
     assert_eq!(config.maxOperators, 100);
     assert!(view.hasConfig && registered.hasConfig);
     assert_eq!(u8::from(config.membership), 1);
-    assert_eq!(u8::from(config.pricing), 2);
+    // Pay-once with no payment: the vault is the only payout path, so jobs carry no fee.
+    assert_eq!(u8::from(config.pricing), 0);
     assert_eq!(registered.supportedMemberships, [config.membership]);
     assert_eq!(view.supportedMemberships, registered.supportedMemberships);
     assert_eq!(config.subscriptionRate, U256::ZERO);
     assert_eq!(config.subscriptionInterval, 0);
-    assert_eq!(config.eventRate, U256::from(1_000_000_000_000_000u64));
+    assert_eq!(config.eventRate, U256::ZERO);
     assert_eq!(registered.sources.len(), 1);
     let source = &registered.sources[0];
     assert_eq!(u8::from(source.kind), 2);

@@ -427,6 +427,13 @@ contract GpuLeaseVaultTest is Test {
         assertEq(after_.confidentiality, before.confidentiality, "I5: confidentiality mutated");
     }
 
+    /// Slash events belong to tnt-core and the BSM; no caller can forge one on the vault.
+    function test_VaultHasNoSlashEventEntryPoint() public {
+        bytes32 id = _create(PRICE, DURATION);
+        (bool ok,) = address(vault).call(abi.encodeWithSignature("onOperatorSlashed(bytes32,uint256)", id, 1));
+        assertFalse(ok, "anyone can emit a slash event for any lease");
+    }
+
     // ==================================================================
     // Withdraw
     // ==================================================================

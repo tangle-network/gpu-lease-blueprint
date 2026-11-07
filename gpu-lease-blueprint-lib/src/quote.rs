@@ -4,8 +4,8 @@
 //!
 //! Hot-reloadable from env/config. NEVER a contract change. The signed RFQ
 //! quote binds `requester + inputsHash + confidentiality + price` (#1568);
-//! this module decides `price` and validates that an on-chain intent's price
-//! is still within operator bounds (fail-closed, like the vault's create).
+//! this module decides `price`, and LEASE refuses a vault price below the
+//! operator's idle quote or outside its duration and device bounds.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -16,12 +16,8 @@ pub enum QuoteValidationError {
     Overflow,
     #[error("unknown gpu class {0}")]
     UnknownClass(String),
-    #[error("price {actual} wei/s exceeds policy ceiling {ceiling} wei/s for class {class}")]
-    PriceAboveCeiling {
-        class: String,
-        actual: u128,
-        ceiling: u128,
-    },
+    #[error("price {0} wei/s is below the policy floor {1} wei/s")]
+    PriceBelowFloor(u128, u128),
     #[error("duration {requested}s out of policy bounds [{min},{max}]")]
     DurationOutOfBounds { requested: u64, min: u64, max: u64 },
     #[error("device count {requested} out of bounds [1,{max}]")]
@@ -166,6 +162,28 @@ impl QuotePolicy {
         } else {
             points[points.len() - 1].1
         }
+    }
+
+    /// LEASE admission: the lessee-chosen vault price must reach this operator's
+    /// idle quote, which also enforces the duration and device-count bounds.
+    pub fn require_lease_price(
+        &self,
+        r: &crate::GpuLeaseRequest,
+    ) -> Result<(), QuoteValidationError> {
+        let floor = self.quote(&QuoteInputs {
+            gpu_class: r.gpuClass.clone(),
+            duration_seconds: r.durationSeconds,
+            confidentiality: r.confidentiality,
+            device_count: r.deviceCount,
+            utilization_bps: 0,
+        })?;
+        if r.pricePerSecond < floor.price_per_second {
+            return Err(QuoteValidationError::PriceBelowFloor(
+                r.pricePerSecond,
+                floor.price_per_second,
+            ));
+        }
+        Ok(())
     }
 
     /// Price a quote request: base × class_bps × utilization × tee_premium.
