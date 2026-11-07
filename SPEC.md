@@ -21,10 +21,11 @@ Only the authorized BSM or slashing contract may invoke the slashing hook.
 
 ## Devices and access
 
-The allocator persists active leases across restart, preserving device identity,
-endpoint and expiry. `GPU_INVENTORY_JSON` is UNVERIFIED operator input. SDK hardware
-detection and signed device attestation remain held for Drew's trust-root decision;
-no GPU verifier or signer is configured. GPU identifiers and TEE types use the SDK.
+The allocator persists leases across restart, preserving device identity, endpoint
+and expiry. `GPU_INVENTORY_JSON` is UNVERIFIED operator input. Signed device
+attestation awaits Drew's trust-root decision; no GPU verifier or signer is
+configured. TEE types come from the SDK.
+GPU class ids and decimal GB per GPU follow the released SDK catalog.
 
 Cloud capacity uses the SDK's allocation and termination lifecycle. Provider
 adapters belong to the SDK.
