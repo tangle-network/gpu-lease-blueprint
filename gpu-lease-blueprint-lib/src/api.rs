@@ -173,10 +173,7 @@ impl OwnerPredicate for LeaseOwner {
         if scope.service_id != ServiceId::new(0) {
             return Err(OwnerAuthError::Unauthorized);
         }
-        let id = hex::decode(&scope.resource)
-            .ok()
-            .and_then(|bytes| bytes.try_into().ok())
-            .ok_or(OwnerAuthError::InvalidRequest)?;
+        let id = parse_lease_id(&scope.resource).map_err(|_| OwnerAuthError::InvalidRequest)?;
         let allocation = self
             .allocator
             .allocation(id)
