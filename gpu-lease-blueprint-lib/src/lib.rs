@@ -129,5 +129,6 @@ pub async fn initialize() -> Result<(), String> {
         return Err("quote signer does not match GPU_OPERATOR_ADDRESS".into());
     }
     chain.validate().await?;
+    api::initialize_auth().await?;
     chain::reconcile(true).await
 }

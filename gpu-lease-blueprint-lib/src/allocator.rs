@@ -95,6 +95,9 @@ impl GpuAllocator {
             &std::env::var("GPU_INVENTORY_JSON").map_err(|_| "GPU_INVENTORY_JSON is required")?,
         )
         .map_err(|_| "invalid GPU_INVENTORY_JSON")?;
+        tracing::warn!(
+            "GPU_INVENTORY_JSON is UNVERIFIED operator input; device attestation trust root is pending"
+        );
         let mut ids = HashSet::new();
         let mut ordinals = HashSet::new();
         for d in &devices {
