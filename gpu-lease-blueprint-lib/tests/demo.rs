@@ -59,12 +59,31 @@ async fn demo_ts_resolver_drives_real_stack() -> Result<()> {
 
 async fn run_demo() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    let sdk = PathBuf::from(
-        std::env::var("DEMO_SDK_DIR").context("DEMO_SDK_DIR must name the updated Sandbox SDK")?,
-    );
+    // DEMO_SDK_DIR selects a Sandbox SDK source checkout; otherwise the pinned npm client runs.
+    let (client, installed, program, args) = match std::env::var_os("DEMO_SDK_DIR") {
+        Some(sdk) => (
+            PathBuf::from(sdk),
+            "node_modules/.bin/vitest",
+            "corepack",
+            vec![
+                "pnpm",
+                "exec",
+                "vitest",
+                "run",
+                "tests/unit/gpu-lease-demo.test.ts",
+            ],
+        ),
+        None => (
+            root.join("tests/sandbox-client"),
+            "node_modules/@tangle-network/sandbox/package.json",
+            "node",
+            vec!["gpu-lease-demo.mjs"],
+        ),
+    };
     ensure!(
-        sdk.join("package.json").is_file(),
-        "Sandbox SDK checkout is unavailable"
+        client.join("package.json").is_file() && client.join(installed).is_file(),
+        "Sandbox client dependencies are not installed in {}",
+        client.display()
     );
     let generator = std::env::var_os("GPU_LEASE_GENERATOR_BINARY")
         .map(PathBuf::from)
@@ -193,16 +212,10 @@ async fn run_demo() -> Result<()> {
         .await
         .expect("operator API failed");
     }));
-    let status = Command::new("corepack")
+    let status = Command::new(program)
         .kill_on_drop(true)
-        .args([
-            "pnpm",
-            "exec",
-            "vitest",
-            "run",
-            "tests/unit/gpu-lease-demo.test.ts",
-        ])
-        .current_dir(sdk)
+        .args(args)
+        .current_dir(&client)
         .env("DEMO_GPU_LEASE", "1")
         .env("DEMO_RPC_URL", &f.http)
         .env("DEMO_OPERATOR_URL", operator_url)
@@ -222,5 +235,6 @@ async fn run_demo() -> Result<()> {
         status.success(),
         "Sandbox client funded demo failed: {status}"
     );
+    println!("DEMO_RESULT pass client={}", client.display());
     Ok(())
 }

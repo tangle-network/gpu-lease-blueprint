@@ -1,0 +1,10 @@
+{
+  "name": "gpu-lease-sandbox-client-demo",
+  "private": true,
+  "type": "module",
+  "description": "Funded demo consumer: the published Sandbox GPU lease client, driven by gpu-lease-blueprint-lib/tests/demo.rs.",
+  "dependencies": {
+    "@tangle-network/sandbox": "1.0.312",
+    "viem": "2.57.16"
+  }
+}
