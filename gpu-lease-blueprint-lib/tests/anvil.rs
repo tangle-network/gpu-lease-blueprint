@@ -333,7 +333,7 @@ impl Chain {
         input: Vec<u8>,
         to: Option<Address>,
         value: U256,
-    ) -> Result<(E, U256)> {
+    ) -> Result<(E, U256, u64)> {
         let provider = self.provider().await?;
         let mut tx = TransactionRequest::default();
         tx.from = Some(from);
@@ -351,9 +351,17 @@ impl Chain {
             bail!("transaction reverted");
         }
         let fee = U256::from(receipt.gas_used) * U256::from(receipt.effective_gas_price);
+        // The mined block's own clock: what the contract saw as block.timestamp.
+        let block = receipt.block_number.context("receipt has no block")?;
+        let mined_at = provider
+            .get_block(block.into())
+            .await?
+            .context("no block")?
+            .header
+            .timestamp;
         for log in receipt.logs() {
             if let Ok(decoded) = E::decode_log(&log.inner) {
-                return Ok((decoded.data, fee));
+                return Ok((decoded.data, fee, mined_at));
             }
         }
         bail!("event {} not found in receipt logs", E::SIGNATURE)
@@ -362,17 +370,6 @@ impl Chain {
     async fn balance(&self, addr: Address) -> Result<U256> {
         let provider = self.provider().await?;
         Ok(provider.get_balance(addr).await?)
-    }
-
-    /// Latest block timestamp (the chain's clock).
-    async fn timestamp(&self) -> Result<u64> {
-        let provider = self.provider().await?;
-        let block = provider
-            .get_block(blueprint_sdk::alloy::eips::BlockId::latest())
-            .await
-            .context("latest block")?
-            .context("no block")?;
-        Ok(block.header.timestamp)
     }
 
     /// I1 on a live chain: vault holds exactly live escrow + unwithdrawn earnings.
@@ -654,7 +651,7 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
             endpointInfo: "{}".into(),
         }
         .abi_encode();
-        let (created, _create_fee): (IGpuLeaseVault::LeaseCreated, U256) = chain
+        let (created, _create_fee, _): (IGpuLeaseVault::LeaseCreated, U256, u64) = chain
             .send_and_decode(buyer, create_input, Some(vault), cost)
             .await?;
         let lease_id = created.leaseId.0;
@@ -866,10 +863,8 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
         // The chain's own clock is the truth: anvil advances time per mined
         // block, so elapsed is measured from the chain, never assumed.
         chain.warp(100).await?;
-        let now = chain.timestamp().await?;
-        anyhow::ensure!(lease_expiry > now, "warp overshot the expiry");
         let buyer_before = chain.balance(buyer).await?;
-        let (released, release_fee): (IGpuLeaseVault::LeaseReleased, U256) = chain
+        let (released, release_fee, now): (IGpuLeaseVault::LeaseReleased, U256, u64) = chain
             .send_and_decode(
                 buyer,
                 IGpuLeaseVault::releaseCall { leaseId: lease_id.into() }.abi_encode(),
@@ -877,10 +872,10 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
                 U256::ZERO,
             )
             .await?;
-        // Exact against the chain clock: refund == price * (expiry - release_ts).
+        // Exact against the release block's clock: refund == price * (expiry - release_ts).
         // (expiry includes the extend: created.expiry + addSeconds.)
         let current_expiry = lease_expiry + add_seconds;
-        anyhow::ensure!(current_expiry > now, "release past expiry?");
+        anyhow::ensure!(lease_expiry > now, "warp overshot the expiry");
         let expected_refund = U256::from(price) * U256::from(current_expiry - now) * U256::from(device_count);
         let total_paid =
             U256::from(price) * U256::from(duration + add_seconds) * U256::from(device_count);
@@ -940,7 +935,7 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
         eprintln!("operator withdrew {}", operator_after - operator_before);
 
         // ── 6. Second lease: REAP path (overstay impossible) ─────────────
-        let (created2, _): (IGpuLeaseVault::LeaseCreated, U256) = chain
+        let (created2, _, _): (IGpuLeaseVault::LeaseCreated, U256, u64) = chain
             .send_and_decode(
                 buyer,
                 IGpuLeaseVault::createCall {
@@ -984,7 +979,7 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
 
         // Warp past expiry; ANYONE reaps — full remaining escrow to operator.
         chain.warp(duration + 60).await?;
-        let (reaped, _): (IGpuLeaseVault::LeaseReaped, U256) = chain
+        let (reaped, _, _): (IGpuLeaseVault::LeaseReaped, U256, u64) = chain
             .send_and_decode(
                 reaper,
                 IGpuLeaseVault::reapCall { leaseId: lease2.into() }.abi_encode(),
