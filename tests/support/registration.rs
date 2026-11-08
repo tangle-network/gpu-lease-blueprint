@@ -142,6 +142,9 @@ pub async fn registered(root: &Path, generator: &Path) -> Result<Registered> {
         }
     })
     .await??;
+    // The snapshot's block clock is months old; lease expiry and owner sessions use real time.
+    let now = std::time::UNIX_EPOCH.elapsed()?.as_secs();
+    provider.anvil_set_time(now).await?;
 
     let keystore_path = scratch.path().join("keystore");
     let keystore = Keystore::new(KeystoreConfig::new().fs_root(&keystore_path))?;
