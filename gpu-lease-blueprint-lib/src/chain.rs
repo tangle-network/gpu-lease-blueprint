@@ -24,6 +24,7 @@ pub struct ChainConfig {
 }
 #[derive(Debug)]
 pub struct Lease {
+    pub chain_id: u64,
     pub operator: Address,
     pub lessee: Address,
     pub escrow: u128,
@@ -108,6 +109,7 @@ impl ChainConfig {
             return Err("unknown lease or wrong operator".into());
         }
         Ok(Lease {
+            chain_id: p.get_chain_id().await.map_err(|e| e.to_string())?,
             operator: l.operator,
             lessee: l.lessee,
             escrow: l.escrow,

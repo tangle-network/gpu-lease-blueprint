@@ -26,9 +26,12 @@ tokio = { version = "1", default-features = false, features = ["sync", "rt"] }
 tracing = "0.1"
 
 [dev-dependencies]
-anyhow = "1"
+blueprint-chain-setup-anvil = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+anyhow = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 base64 = "0.22"
 blueprint-anvil-testing-utils = { version = "=0.2.1" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

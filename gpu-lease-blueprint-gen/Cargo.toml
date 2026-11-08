@@ -19,8 +19,9 @@ clap = { version = "4", features = ["derive"] }
 same-file = "1"
 
 [dev-dependencies]
+anyhow = { workspace = true }
 hex = "0.4"
 blueprint-chain-setup-anvil = { workspace = true }
-sha2 = "0.10"
-tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "process"] }
