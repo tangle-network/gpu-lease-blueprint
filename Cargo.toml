@@ -14,8 +14,8 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 chrono = "0.4"
-blueprint-sdk = { version = "=0.2.1", default-features = false }
-blueprint-chain-setup-anvil = { version = "=0.2.1" }
+blueprint-sdk = { version = "=0.3.0", default-features = false }
+blueprint-chain-setup-anvil = { version = "=0.2.2" }
 
 [profile.dev]
 split-debuginfo = "unpacked"
