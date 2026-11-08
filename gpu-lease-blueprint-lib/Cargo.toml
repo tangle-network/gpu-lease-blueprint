@@ -6,7 +6,11 @@ authors.workspace = true
 description.workspace = true
 license.workspace = true
 
+[features]
+cloud = ["blueprint-sdk/remote-providers", "tokio/time", "dep:chrono"]
+
 [dependencies]
+chrono = { workspace = true, optional = true }
 blueprint-sdk = { workspace = true, features = ["std", "tracing", "macros", "tangle", "local-store", "tee"] }
 hex = "0.4"
 fs2 = "0.4"
@@ -28,6 +32,6 @@ tempfile = { workspace = true }
 anyhow = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
 base64 = "0.22"
-blueprint-anvil-testing-utils = { version = "=0.2.0" }
+blueprint-anvil-testing-utils = { version = "=0.2.1" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

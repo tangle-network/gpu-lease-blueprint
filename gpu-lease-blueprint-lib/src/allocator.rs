@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
-    io::Write,
     path::PathBuf,
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
@@ -181,25 +180,8 @@ impl GpuAllocator {
         let Some(path) = &self.path else {
             return Ok(());
         };
-        let write = || -> Result<(), Box<dyn std::error::Error>> {
-            let tmp = path.with_extension("pending");
-            let mut options = OpenOptions::new();
-            options.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&tmp)?;
-            file.write_all(&serde_json::to_vec(
-                &state.live.values().collect::<Vec<_>>(),
-            )?)?;
-            file.sync_all()?;
-            std::fs::rename(&tmp, path)?;
-            File::open(path.parent().unwrap())?.sync_all()?;
-            Ok(())
-        };
-        write().map_err(|e| AllocatorError::Journal(e.to_string()))
+        crate::journal::write(path, &state.live.values().collect::<Vec<_>>())
+            .map_err(|e| AllocatorError::Journal(e.to_string()))
     }
 
     fn mutate<T>(

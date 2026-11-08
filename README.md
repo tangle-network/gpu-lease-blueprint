@@ -20,6 +20,42 @@ DEMO_SDK_DIR=/path/to/agent-container/products/sandbox/sdk ./scripts/run-demo.sh
 
 The lib Anvil suite needs Docker; registration uses native Anvil, the CLI and built artifacts.
 
+## Cloud capacity deployment (pending SDK release)
+
+The opt-in `cloud` feature deploys a caller-selected workload through the SDK;
+it needs a published SDK containing `lock_lease`, `recover_lease` and the initialize/open
+lease-state context APIs. The current dependency pin does not contain these APIs.
+Source-override checks are interim proof.
+
+After adopting that release, build the existing operator binary with `--features cloud`:
+
+```bash
+GPU_CLOUD_CAPACITY=1 target/debug/gpu-lease-blueprint < "$PRIVATE_CONFIGURATION"
+```
+
+The bounded JSON input has exactly `credentials`, `spec`, and `state_dir` keys.
+Use the SDK's [ProviderCredentials](https://github.com/tangle-network/blueprint/blob/main/crates/blueprint-remote-providers/src/managed/credentials.rs)
+and [ResourceSpec](https://github.com/tangle-network/blueprint/blob/main/crates/core/src/resources.rs)
+formats. Supply ownership, GPU class/count, a positive duration and price cap,
+an immutable image digest, explicit workload command and a stable SSH public key.
+Keep the corresponding private key with the caller. Provider credentials stay on stdin;
+workload configuration is explicit and never inherits the launcher's environment.
+
+Use a dedicated, initially empty private state directory and retain it for recovery.
+Only the first fresh attempt initializes SDK authority; restarts open it without repair.
+Preserve the SDK's private original quote/deadline authorization alongside the caller journal.
+The public receipt contains SDK connection facts after bounded status/readiness checks.
+These are provider observations, not hardware attestation or proof of image execution.
+Ctrl-C/SIGTERM retires capacity through the SDK and waits for absence; deadline retirement
+uses the original SDK deadline. Interrupted or failed cleanup resumes with the same input
+and state, without another rental. Missing/corrupt state and unproved account rotation fail
+closed. Do not reuse a retired identity or erase its journal to authorize a new rental.
+An abruptly stopped supervisor needs a recovery invocation; provider auto-expiry is not assumed.
+
+This deployment mode leaves local GPU inventory and paid LEASE jobs unchanged. It does not
+attach a remote node's CUDA devices to a Sandbox on another host or add cloud fallback to
+marketplace jobs. Input inventory remains UNVERIFIED while the attestation trust root is held.
+
 ## Deploy
 
 Use an SDK keystore (`cargo tangle key import --help` supports interactive import); keep keys out
