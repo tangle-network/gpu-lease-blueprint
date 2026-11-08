@@ -38,11 +38,8 @@ use tokio::time::timeout;
 
 const ANVIL_TEST_TIMEOUT: Duration = Duration::from_secs(600);
 const JOB_RESULT_TIMEOUT: Duration = Duration::from_secs(120);
-/// Foundry artifact for the vault — produced by `forge build`.
-const VAULT_ARTIFACT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../contracts/out/GpuLeaseVault.sol/GpuLeaseVault.json"
-);
+/// Foundry artifacts — produced by `forge build`.
+const ARTIFACTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../contracts/out");
 
 static HARNESS_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new(()));
 static LOG_INIT: std::sync::Once = std::sync::Once::new();
@@ -67,6 +64,12 @@ async fn spawn_harness() -> Result<Option<BlueprintHarness>> {
             .poll_interval(Duration::from_millis(50))
             .with_env_var("GPU_INVENTORY_JSON", GPU_INVENTORY)
             .with_env_var("GPU_QUOTE_SIGNING_KEY", QUOTE_SIGNING_KEY)
+            .with_env_var(
+                "GPU_LEASE_STATE_PATH",
+                std::env::temp_dir()
+                    .join(format!("gpu-lease-anvil-{}.json", std::process::id()))
+                    .to_string_lossy(),
+            )
             .with_env_var("GPU_QUOTE_POLICY_JSON", r#"{"base_price_per_second":{"h100":300000000000000},"class_bps":{},"tee_premium_bps":2500,"utilization_curve":[[0,8000],[5000,10000],[10000,12000]],"min_duration_seconds":60,"max_duration_seconds":2592000}"#)
             .spawn()
             .await
@@ -392,17 +395,18 @@ impl Chain {
     }
 }
 
-/// Deploy the real vault bytecode from the foundry artifact.
-async fn deploy_vault(chain: &Chain, deployer: Address) -> Result<Address> {
-    let artifact = std::fs::read_to_string(VAULT_ARTIFACT).with_context(|| {
-        format!("vault artifact missing at {VAULT_ARTIFACT} — run `forge build`")
-    })?;
+/// Deploy a real contract from its foundry artifact with ABI-encoded constructor args.
+async fn deploy(chain: &Chain, deployer: Address, name: &str, args: Vec<u8>) -> Result<Address> {
+    let path = format!("{ARTIFACTS}/{name}.sol/{name}.json");
+    let artifact = std::fs::read_to_string(&path)
+        .with_context(|| format!("artifact missing at {path} — run `forge build`"))?;
     let artifact: serde_json::Value = serde_json::from_str(&artifact)?;
     let bytecode = artifact["bytecode"]["object"]
         .as_str()
         .context("artifact missing bytecode.object")?
         .trim_start_matches("0x");
-    let bytecode = hex::decode(bytecode).context("bytecode hex")?;
+    let mut bytecode = hex::decode(bytecode).context("bytecode hex")?;
+    bytecode.extend(args);
     let provider = chain.provider().await?;
     let mut tx = TransactionRequest::default();
     tx.from = Some(deployer);
@@ -442,7 +446,7 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
             eprintln!("skipping e2e: docker socket unreachable (on macOS+colima: scripts/run-e2e.sh)");
             return Ok(());
         }
-        if !std::path::Path::new(VAULT_ARTIFACT).exists() {
+        if !std::path::Path::new(ARTIFACTS).join("GpuLeaseVault.sol").exists() {
             eprintln!("skipping e2e: vault artifact missing — run `forge build` first");
             return Ok(());
         }
@@ -597,9 +601,9 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
             eprintln!("skipping driver round-trip: {METADATA_JSON} missing (run the gen)");
         }
 
-        // ── Cast: buyer, operator-money-sink, reaper, deployer ────────────
+        // ── Cast: buyer, operator (its quote signer), reaper, deployer ────
         let buyer = harness.caller_account();
-        let operator: Address = "0x00000000000000000000000000000000000000b1".parse()?; // money sink
+        let operator = gpu_lease_blueprint_lib::api::quote_signer().map_err(anyhow::Error::msg)?.address();
         let reaper: Address = "0x00000000000000000000000000000000000000b2".parse()?; // permissionless reaper
         let deployer: Address = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".parse()?; // anvil #0
 
@@ -608,9 +612,24 @@ async fn gpu_lease_full_lifecycle_end_to_end_inner() -> Result<()> {
             chain.fund(addr).await?;
         }
 
-        // ── Deploy the real vault on the same chain as the jobs ──────────
-        let vault = deploy_vault(&chain, deployer).await?;
-        eprintln!("vault deployed at {vault:#x}");
+        // The snapshot's block clock is months old; the allocator checks paid expiry against wall time.
+        let now = std::time::UNIX_EPOCH.elapsed()?.as_secs();
+        chain.raw("anvil_setTime", serde_json::json!([now])).await?;
+
+        // ── Deploy the real vault and BSM on the same chain as the jobs ──
+        let vault = deploy(&chain, deployer, "GpuLeaseVault", vec![]).await?;
+        let verifier = deploy(&chain, deployer, "GpuLeaseEvidenceVerifier", deployer.abi_encode()).await?;
+        let bsm = deploy(&chain, deployer, "GpuLeaseBlueprint", (vault, verifier).abi_encode()).await?;
+        eprintln!("vault deployed at {vault:#x}, blueprint at {bsm:#x}");
+
+        // The operator's job handlers read the funded lease from this chain config.
+        // SAFETY: HARNESS_LOCK serializes this suite; handlers read env per job.
+        unsafe {
+            std::env::set_var("HTTP_RPC_URL", &chain.rpc);
+            std::env::set_var("GPU_LEASE_VAULT_ADDRESS", format!("{vault:#x}"));
+            std::env::set_var("GPU_LEASE_BLUEPRINT_ADDRESS", format!("{bsm:#x}"));
+            std::env::set_var("GPU_OPERATOR_ADDRESS", format!("{operator:#x}"));
+        }
 
         let price: u128 = 300_000_000_000_000; // wei/s PER DEVICE, the policy's neutral price
         let duration: u64 = 600; // seconds
