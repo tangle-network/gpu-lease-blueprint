@@ -60,9 +60,10 @@ async fn demo_ts_resolver_drives_real_stack() -> Result<()> {
 async fn run_demo() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     // DEMO_SDK_DIR selects a Sandbox SDK source checkout; otherwise the pinned npm client runs.
-    let (client, program, args) = match std::env::var_os("DEMO_SDK_DIR") {
+    let (client, installed, program, args) = match std::env::var_os("DEMO_SDK_DIR") {
         Some(sdk) => (
             PathBuf::from(sdk),
+            "node_modules/.bin/vitest",
             "corepack",
             vec![
                 "pnpm",
@@ -74,16 +75,14 @@ async fn run_demo() -> Result<()> {
         ),
         None => (
             root.join("tests/sandbox-client"),
+            "node_modules/@tangle-network/sandbox/package.json",
             "node",
             vec!["gpu-lease-demo.mjs"],
         ),
     };
     ensure!(
-        client.join("package.json").is_file()
-            && client
-                .join("node_modules/@tangle-network/sandbox/package.json")
-                .is_file(),
-        "Sandbox client is not installed in {}; run `npm ci` there or set DEMO_SDK_DIR",
+        client.join("package.json").is_file() && client.join(installed).is_file(),
+        "Sandbox client dependencies are not installed in {}",
         client.display()
     );
     let generator = std::env::var_os("GPU_LEASE_GENERATOR_BINARY")
