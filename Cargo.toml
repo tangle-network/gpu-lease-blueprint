@@ -13,9 +13,12 @@ description = "GPU Lease Blueprint — escrowed GPU leases on Tangle (SPEC.md is
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+anyhow = "1"
 chrono = "0.4"
 blueprint-sdk = { version = "=0.3.0", default-features = false }
 blueprint-chain-setup-anvil = { version = "=0.2.2" }
+sha2 = "0.10"
+tempfile = "3"
 
 [profile.dev]
 split-debuginfo = "unpacked"
