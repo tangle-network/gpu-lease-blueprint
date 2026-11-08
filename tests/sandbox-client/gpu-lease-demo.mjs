@@ -1,7 +1,7 @@
 // Published-client proof, run by gpu-lease-blueprint-lib/tests/demo.rs against its funded Anvil stack.
 // Mirrors the Sandbox SDK source test tests/unit/gpu-lease-demo.test.ts, importing the installed npm package.
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import {
   createViemGpuLeaseChain,
@@ -18,7 +18,10 @@ const required = (name) => {
   return value;
 };
 const step = (name, facts = "") => console.log(`DEMO_STEP ${name} ${facts}`.trimEnd());
-const sandboxPackage = createRequire(import.meta.url)("@tangle-network/sandbox/package.json");
+// The package exports no ./package.json subpath; read the installed manifest directly.
+const sandboxPackage = JSON.parse(
+  readFileSync(new URL("node_modules/@tangle-network/sandbox/package.json", import.meta.url)),
+);
 step("client", `package=${sandboxPackage.name}@${sandboxPackage.version}`);
 
 const rpcUrl = required("DEMO_RPC_URL");
