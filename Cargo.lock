@@ -1909,9 +1909,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-anvil-testing-utils"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70c2e8702284d4fdb2f9548e1af019f9da19452194b32e170991ff65c372c040"
+checksum = "34fab26691b8d34fe4e6472bc3368da5d0c81b39e3f9579a6e0cb38442c5d9fe"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -1948,9 +1948,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-auth"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8035c718d26d85af944aaf939caa8193e6c28b06e71056a0bfa6fd9c4a202291"
+checksum = "2187dc8b6cf652b583b0193822178e584fcf34985476372f176770cee746ed6e"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1994,18 +1994,18 @@ dependencies = [
 
 [[package]]
 name = "blueprint-chain-setup"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53e816444f4c5cf5edc4d2833795ffb9e89fe71bfa741048e4ec3e0d539041a2"
+checksum = "a1f8ceaa6e8f347e01c6c07696b2536a7f5df89fa53de9d9e690db4f4b17e7c3"
 dependencies = [
  "blueprint-chain-setup-anvil",
 ]
 
 [[package]]
 name = "blueprint-chain-setup-anvil"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cf8f5cb59e0348a9e64d80fc30792fd0ba204f05633e7eaa7128d913e7f9030"
+checksum = "03e7e0bb5657482c7d45c8bf67fcb40902f37506492bac3b1c8ead5de9735f7f"
 dependencies = [
  "alloy-contract",
  "alloy-provider",
@@ -2037,9 +2037,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-client-evm"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffde065520b2928fcfcc6cf5d7b9961f719bbd96aa5e5b34da0a92e29f8ccfce"
+checksum = "df5479e5bbb5ad407001e6a44ab1a38f87589d63de0bce01d92bb97e233d78e8"
 dependencies = [
  "alloy-consensus",
  "alloy-json-rpc",
@@ -2065,9 +2065,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-client-tangle"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9aae25a460baa31eb652dd17162a5e04156e949de388e6c18d5189ccc56a770d"
+checksum = "f4e50b86d4ade2c8284f90fe4be97c596e9313bda130ccb2598e69d13959d25b"
 dependencies = [
  "alloy-contract",
  "alloy-network",
@@ -2097,9 +2097,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-clients"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a13d16b7e0a54eb04f4a0cd49409ac65ee50a2a2633f614b759541ee69850d65"
+checksum = "5b8a9bf9041bcd34293068baf1ebc197d841b6db3c51b9d101844d2c540ab85c"
 dependencies = [
  "blueprint-client-core",
  "blueprint-client-evm",
@@ -2121,9 +2121,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-contexts"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21fe96df5fb5602c8fdcf2ff83ea517d1bd04f5fc3ba05e65012c9ecbc03bc29"
+checksum = "385fea32f82e51960adcd4aedd0bf23c09ab03c156631254c37dadfb353591f1"
 dependencies = [
  "blueprint-client-tangle",
  "blueprint-clients",
@@ -2135,9 +2135,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-core"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "280a58bf91ec6e16d743119f1c815bb367b17dbb4bd8c77ee0f88d3dc678ffb4"
+checksum = "fe7955f37e09a5d95a37f6b3e44a865432444758a15b9b568f0ef1d4c7cb6075"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2152,9 +2152,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-core-testing-utils"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0b2db3b6386889dc1bbe5fe628140e1fa1c53ab241f5123c10cf1dd4e62b598"
+checksum = "a56948d295d75c638a977e04309c6c62eb0bf2d01e3ab0a91e319a3de8430a66"
 dependencies = [
  "blueprint-auth",
  "blueprint-clients",
@@ -2306,9 +2306,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-evm-extra"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a71c4702098c65ea940f1a588564aee2804427fe7e6b0f6bce742941d322e8e"
+checksum = "d96c018dca068a10bdfacefd6f3da5bf36cadfa8f57e27b572d5847b9e38ed82"
 dependencies = [
  "alloy-consensus",
  "alloy-network",
@@ -2383,9 +2383,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-manager-bridge"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9894acdf32d75d3dc1946560d3d91ec5407de60354f625ecc4544bdf9ed28d9"
+checksum = "51487161a4d667a8ad7399d4b6e6e5a72397bcafe89cec38076a258707091125"
 dependencies = [
  "blueprint-auth",
  "blueprint-core",
@@ -2412,9 +2412,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-networking"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dd8ca76686386ccd523288d8f23f217cbac56a211c8889ac8613a4c9344ab3d"
+checksum = "69e5bd9796d7606bd288913dc3d40b7c0ca6266716263e8f0c81c12c74df5bc9"
 dependencies = [
  "alloy-primitives",
  "bincode",
@@ -2438,9 +2438,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-pricing-engine"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a8d6c19f910bf01510aaa00ba7585713641a9af35a12921d5a8ad85c2520b02"
+checksum = "4da85ee3eae8cdbaddfc0b5b76830a6705ef4a97680e47548bbff9ba597c8a97"
 dependencies = [
  "alloy-primitives",
  "alloy-provider",
@@ -2494,9 +2494,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-producers-extra"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fc457d06f6086aa8ee2c189f9717a1451e8a1a6576df5cab422d0632c567e63"
+checksum = "f779f949fb924bd2c62a5dede5e83cbf940d1330a2637848880e8c0486882199"
 dependencies = [
  "blueprint-core",
  "document-features",
@@ -2505,9 +2505,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-qos"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de4f0001b1cba7e757d06ddbcdc7dafe20631fecb178c6aae0d8effee109aafa"
+checksum = "75855b842985f3566648b8ae4ba5aa731917c69b237b0ba6a7a7daa7106dbed9"
 dependencies = [
  "alloy-network",
  "alloy-primitives",
@@ -2552,9 +2552,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-remote-providers"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "931aa33c242a97abf06dd8d70b65ca72a1a513ad791d39ba116362fd08e5ac7b"
+checksum = "e49a092bb7cdad398b466bfe5efcca120a54003388d2525ab567abeb8f552ae8"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2596,9 +2596,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-router"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3f87bc9291afa13e8679504977446d623df5aee1bc8b2de2a4b199d467c4f84"
+checksum = "d4955e1281af0b16fb5d4f1cc8fac8a84689ebd0ce4d6f7caf18ac24ac5e1d40"
 dependencies = [
  "blueprint-core",
  "bytes",
@@ -2611,9 +2611,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-runner"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f560684fe75b0b65ecd89a664b9983edb3ffcaef8af4dff6143350ab405134e6"
+checksum = "efa0688be7ef5c324590421680500f3007680b3cfc19629e60c4ea294fe8b549"
 dependencies = [
  "alloy-primitives",
  "alloy-provider",
@@ -2648,9 +2648,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-sdk"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f83085e43aff36acc16d59be182a14ad421f54aa2168f2b8c0f0e4e4372a44eb"
+checksum = "710df920c8f7aeb025ab80dc732c9b4d1d61abadca17f21f7c28d9ecd52fc572"
 dependencies = [
  "alloy",
  "blueprint-auth",
@@ -2717,9 +2717,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-tangle-extra"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f12ed49277d164da6dc7bc2ef58b4a4b53e41874c87f6383bf808f68a292c3e1"
+checksum = "5fae59241a32bdebe4899955887fef34c0c4caa8141e35d358b488a102754d1d"
 dependencies = [
  "alloy",
  "alloy-primitives",
@@ -2742,9 +2742,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-tee"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8070ccaa1925dde44839562bf94fe84c5a771c65cbc9ca06a99c14e8de966672"
+checksum = "6b2ee6c3e8270a599dfa88296c37974186360af36fe5c91f20d79374bfc5835a"
 dependencies = [
  "blueprint-core",
  "blueprint-std",
@@ -2768,9 +2768,9 @@ dependencies = [
 
 [[package]]
 name = "blueprint-testing-utils"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "537a528a68a399aa0f054ebde1723a0a32e134548ada98cf05805886fe6e0f77"
+checksum = "f583c5557fb746b9048b1dd015b54cc5ce33b5b1360b1d9abcd861bea74ce35f"
 dependencies = [
  "blueprint-anvil-testing-utils",
  "blueprint-core-testing-utils",
