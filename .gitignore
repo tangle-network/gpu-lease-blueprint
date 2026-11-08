@@ -3,3 +3,4 @@ cache/
 target/
 dependencies/
 .tmp-e2e/
+tests/sandbox-client/node_modules/
