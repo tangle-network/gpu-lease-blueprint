@@ -29,6 +29,14 @@ GPU class ids and decimal GB per GPU follow the released SDK catalog.
 
 Cloud capacity uses the SDK's allocation and termination lifecycle. Provider
 adapters belong to the SDK.
+The opt-in operator cloud-capacity mode deploys an explicit workload and supervises
+its SDK lease through scoped recovery and confirmed retirement. Its credentials,
+resource specification and private state directory come from bounded stdin JSON.
+Fresh state initializes SDK authorization before native operations; restarts only open
+existing authority. Missing or corrupt SDK state never imports provider metadata.
+This is deployment adoption, not remote-device fallback for paid marketplace jobs;
+local allocation, escrow and access contracts remain unchanged. The containing SDK
+release is a prerequisite, and a source override is only intermediate proof.
 
 Job results contain public endpoints and lease identifiers. Lease credentials stay
 off-chain. Blueprint-auth supplies EIP-191 recovery and tokens scoped to a lease

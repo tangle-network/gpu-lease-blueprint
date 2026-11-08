@@ -10,8 +10,11 @@
 pub mod allocator;
 pub mod api;
 pub mod chain;
+#[cfg(feature = "cloud")]
+pub mod cloud;
 pub mod consumer;
 pub mod jobs;
+mod journal;
 pub mod quote;
 
 use blueprint_sdk::Job;
