@@ -15,8 +15,13 @@ forge soldeer install
 forge build
 cargo test --workspace
 forge test
-DEMO_SDK_DIR=/path/to/agent-container/products/sandbox/sdk ./scripts/run-demo.sh
+./scripts/run-demo.sh
 ```
+
+`run-demo.sh` runs the funded demo against the published Sandbox client pinned in
+`tests/sandbox-client/package.json`, installed with `npm ci`. A non-empty `DEMO_SDK_DIR` runs it
+against a Sandbox SDK source checkout with installed dependencies instead:
+`DEMO_SDK_DIR=/path/to/agent-container/products/sandbox/sdk ./scripts/run-demo.sh`.
 
 The lib Anvil suite needs Docker; registration uses native Anvil, the CLI and built artifacts.
 
