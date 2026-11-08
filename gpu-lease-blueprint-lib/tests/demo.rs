@@ -59,8 +59,9 @@ async fn demo_ts_resolver_drives_real_stack() -> Result<()> {
 
 async fn run_demo() -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-    // DEMO_SDK_DIR selects a Sandbox SDK source checkout; otherwise the pinned npm client runs.
-    let (client, installed, program, args) = match std::env::var_os("DEMO_SDK_DIR") {
+    // A non-empty DEMO_SDK_DIR selects a Sandbox SDK source checkout; else the pinned npm client.
+    let source = std::env::var_os("DEMO_SDK_DIR").filter(|dir| !dir.is_empty());
+    let (client, installed, program, args) = match source {
         Some(sdk) => (
             PathBuf::from(sdk),
             "node_modules/.bin/vitest",
