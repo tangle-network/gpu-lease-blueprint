@@ -64,7 +64,13 @@ async fn run_demo() -> Result<()> {
         Some(sdk) => (
             PathBuf::from(sdk),
             "corepack",
-            vec!["pnpm", "exec", "vitest", "run", "tests/unit/gpu-lease-demo.test.ts"],
+            vec![
+                "pnpm",
+                "exec",
+                "vitest",
+                "run",
+                "tests/unit/gpu-lease-demo.test.ts",
+            ],
         ),
         None => (
             root.join("tests/sandbox-client"),
@@ -74,7 +80,9 @@ async fn run_demo() -> Result<()> {
     };
     ensure!(
         client.join("package.json").is_file()
-            && client.join("node_modules/@tangle-network/sandbox/package.json").is_file(),
+            && client
+                .join("node_modules/@tangle-network/sandbox/package.json")
+                .is_file(),
         "Sandbox client is not installed in {}; run `npm ci` there or set DEMO_SDK_DIR",
         client.display()
     );
